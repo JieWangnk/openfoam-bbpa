@@ -1,0 +1,22 @@
+## OpenFOAM build artifacts
+src/*/Make/linux*/
+src/*/lnInclude/
+*.dep
+*.o
+
+## Tutorial run artifacts
+tutorials/*/[0-9]*/
+tutorials/*/processor*/
+tutorials/*/postProcessing/
+tutorials/*/log.*
+tutorials/*/*.foam
+tutorials/*/VTK/
+!tutorials/*/0/
+
+## Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+__pycache__/
+*.pyc

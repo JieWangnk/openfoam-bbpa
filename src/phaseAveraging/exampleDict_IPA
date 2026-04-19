@@ -1,0 +1,140 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Copyright (C) 2024 OpenFOAM Foundation
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Example usage of IPA (Instantaneous Phase Averaging) function object
+// Add this to your system/controlDict file in the functions{} section
+
+functions
+{
+    // IPA - Instantaneous Phase Averaging 
+    // Samples instantaneous field values at specific phase points
+    IPA1
+    {
+        type            IPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        // Fields to average
+        fields          (U p k);
+        
+        // Period of oscillation in seconds
+        period          1.0;
+        
+        // Number of phase points per period (default: 50)
+        nPhases         50;
+        
+        // Starting cycle number (averaging begins from this cycle, default: 0)
+        startCycle      2;
+        
+        // Phase tolerance for sampling (default: 0.01s)
+        phaseTolerance  0.01;
+    }
+    
+    // Example for high-resolution phase sampling
+    IPA2
+    {
+        type            IPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        // Only velocity field
+        fields          (U);
+        
+        // Period of 0.5 seconds
+        period          0.5;
+        
+        // High resolution: 100 phase points
+        nPhases         100;
+        
+        // Start immediately
+        startCycle      0;
+        
+        // Tighter tolerance
+        phaseTolerance  0.005;
+    }
+    
+    // Example for coarse phase sampling
+    IPA3
+    {
+        type            IPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        fields          (U p vorticity);
+        period          2.0;        // Long period
+        nPhases         20;         // Coarse sampling (0.1s intervals)
+        startCycle      1;          // Skip first cycle
+        phaseTolerance  0.02;       // Larger tolerance
+    }
+}
+
+// INSTANTANEOUS PHASE AVERAGING (IPA) - Key Concepts:
+//
+// 1. Phase Point Definition:
+//    - Phase points: φ_i = i * (period / nPhases) for i = 0, 1, ..., nPhases-1
+//    - Example: period=1.0s, nPhases=50 → phase points at 0.0s, 0.02s, 0.04s, ..., 0.98s
+//
+// 2. Sampling Strategy:
+//    - Samples instantaneous field values when simulation time matches phase points
+//    - Uses phaseTolerance to determine when time is "close enough" to phase point
+//    - Only samples each phase point once per cycle
+//
+// 3. Phase Averaging:
+//    - PA_φ,i^(N) = (1/N) Σ[n=1 to N] φ_inst,n,i
+//    - Averages instantaneous samples across multiple cycles
+//    - Each phase point gets independent averaging
+//
+// 4. Output files:
+//    - Field phase points: <fieldName>_IPA_phase<N> (e.g., U_IPA_phase0, U_IPA_phase1, ...)
+//    - Preserves full field information (vectors stay as vectors, not magnitude)
+//
+// 5. Comparison with BBPA:
+//    - BBPA: Time integration within bins → continuous averaging
+//    - IPA: Point sampling at phase points → discrete averaging
+//    - BBPA: Better for smooth temporal resolution
+//    - IPA: Better for capturing specific phase relationships
+//
+// 6. Phase Tolerance:
+//    - Determines how close simulation time must be to phase point for sampling
+//    - Too small: may miss phase points due to variable time steps
+//    - Too large: may sample wrong phase points
+//    - Recommended: 0.01s for most applications
+//
+// 7. Example Timeline (period=1.0s, nPhases=50, startCycle=2):
+//    - Cycle 0-1: Pre-averaging phase (no sampling)
+//    - Cycle 2: Start sampling at phase points 0.0s, 0.02s, 0.04s, etc.
+//    - At writeTime: Output U_IPA_phase0, U_IPA_phase1, etc. with current averages
+//    - Cycle 3+: Continue sampling and updating averages
+//
+// 8. Progress messages:
+//    - "Starting cycle X (instantaneous phase averaging begins)"
+//    - "Sampling phase Y/Z at time T (cycle X)"
+//    - "U (instantaneous): wrote X/Y phase points"
+//    - "Total samples collected: X"
+//
+// 9. Best Use Cases:
+//    - When you need specific phase relationships (e.g., every 18 degrees)
+//    - When simulation time steps naturally align with desired phase points
+//    - When you want to preserve full field information (not just magnitude)
+//    - When you need exact phase synchronization across multiple fields
+
+// ************************************************************************* //

@@ -1,0 +1,150 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Copyright (C) 2024 OpenFOAM Foundation
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Example usage of BBPA (Bin-Based Phase Averaging) function object
+// Add this to your system/controlDict file in the functions{} section
+//
+// SETUP IS IDENTICAL TO binBasedPhaseAverage - just change the type name!
+// The improvement is internal: proper time integration instead of sample averaging
+//
+// To upgrade from binBasedPhaseAverage:
+// 1. Change: type binBasedPhaseAverage; → type BBPA;
+// 2. Change: libs ("libfieldFunctionObjects.so"); → libs ("libPhaseAveraging.so");
+// 3. Keep all other parameters identical!
+
+functions
+{
+    // BBPA - Bin-Based Phase Averaging with TRUE time integration
+    // Setup is identical to binBasedPhaseAverage, but with proper time integration within bins
+    BBPA1
+    {
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        // Fields to average
+        fields          (U p k);
+        
+        // Period of oscillation in seconds
+        period          1.0;
+        
+        // Number of bins per period (default: 100)
+        nBins           50;
+        
+        // Starting cycle number (averaging begins from this cycle, default: 0)
+        startCycle      2;
+        
+        // Number of cycles to average (-1 for unlimited, default: -1)
+        cycles          -1;
+    }
+    
+    // Example for different settings
+    BBPA2
+    {
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        // Only average velocity field
+        fields          (U);
+        
+        // Period of 0.5 seconds
+        period          0.5;
+        
+        // More bins for higher temporal resolution
+        nBins           100;
+        
+        // Start averaging immediately
+        startCycle      0;
+        
+        // Average only 10 cycles
+        cycles          10;
+    }
+    
+    // Example for high frequency oscillations
+    BBPA3
+    {
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        
+        fields          (U p vorticity);
+        period          0.1;      // 10 Hz oscillation
+        nBins           50;       // 2ms resolution per bin
+        startCycle      3;        // Skip first 3 cycles for flow development
+        cycles          20;       // Average 20 cycles
+    }
+    
+    // Direct comparison: Replace binBasedPhaseAverage with BBPA
+    // OLD (flawed sample averaging):
+    // binBasedPhaseAverage1 { type binBasedPhaseAverage; ... }
+    // 
+    // NEW (correct time integration):
+    // BBPA1 { type BBPA; ... }  // Same parameters, better math!
+}
+
+// SETUP IS IDENTICAL TO binBasedPhaseAverage - just replace the type name!
+// The improvement is internal: true time integration instead of sample averaging
+
+// Notes:
+// 1. BBPA implements TRUE time integration within bins (fixes binBasedPhaseAverage flaw)
+//    - Same parameters as binBasedPhaseAverage
+//    - Uses magnitude for vector/tensor fields
+//    - Performs time integration: φ_Bin,j = (1/Δt) ∫ φ(t) dt within each bin
+//    - Averages time-integrated bin data across multiple cycles
+//    - Properly handles variable time steps
+//
+// 2. Output fields:
+//    - Field bins: <fieldName>_BBPA_bin<N> (e.g., U_BBPA_bin0, U_BBPA_bin1, ...)
+//    - Variance: <fieldName>_BBPA_binVariance<N> (only written when cross-cycle data exists)
+//
+// 3. Bin calculation and time integration:
+//    - Bin index = min(floor(phase/binDeltaT), nBins-1)
+//    - binDeltaT = period/nBins
+//    - Each bin performs time integration: φ_Bin,j = (1/Δt) ∫ φ(t) dt
+//    - Accumulates: φ(t) * dt for each time step within the bin
+//    - Final bin value: total_sum / total_time
+//
+// 4. Write behavior:
+//    - If cross-cycle data exists: writes averaged data from multiple cycles
+//    - If only current cycle data: writes current cycle average for each bin
+//    - Only writes bins that have accumulated data
+//
+// 5. startCycle parameter:
+//    - Allows skipping initial cycles for flow development
+//    - Phase averaging begins from the specified cycle number
+//    - Useful for transient simulations that need time to reach periodic state
+//
+// 6. Example timeline with writeTime = 0.5s, period = 1.0s, startCycle = 2:
+//    - Cycles 0 and 1 are skipped (pre-averaging phase)
+//    - At t=1.5s (middle of cycle 2): writes U_BBPA_bin0 through U_BBPA_bin49
+//    - At t=2.5s (middle of cycle 3): writes updated bin files with more data
+//    - At t=3.0s (end of cycle 3): writes cross-cycle averaged data
+//
+// 7. Progress messages:
+//    - "Starting cycle X (phase averaging begins)"
+//    - "U bin averaging (time-integrated): Total cycles processed: X"
+//    - "Bins with cross-cycle data: X/Y"
+//    - "Bins with current cycle data: X/Y"
+//    - "Using time integration within bins"
+
+// ************************************************************************* //

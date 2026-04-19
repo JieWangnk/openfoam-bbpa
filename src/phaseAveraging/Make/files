@@ -1,0 +1,4 @@
+BBPA.C
+IPA.C
+
+LIB = $(FOAM_USER_LIBBIN)/libPhaseAveraging
