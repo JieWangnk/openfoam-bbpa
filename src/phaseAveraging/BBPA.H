@@ -85,6 +85,19 @@ class BBPA
         //- Time step size for bins
         scalar binDeltaT_;
 
+        //- Output mode for phase-averaged fields.
+        //   "phaseAlignedDirs" (default, back-compat): at each write()
+        //     call, dump all I bins to phase-aligned time directories
+        //     t_j = cycleStart + j*binDeltaT. ParaView-friendly but
+        //     produces I dirs per write.
+        //   "companion": at each write() call, write only the current
+        //     phase's bin into the solver's current time directory,
+        //     alongside the instantaneous fields. One directory per
+        //     write, no extra dirs created.
+        //   "both": do both -- companion every write + a full
+        //     phase-aligned dump on the final call.
+        word writeMode_;
+
         //- Current cycle number
         label currentCycle_;
 
@@ -147,6 +160,16 @@ class BBPA
                 const scalar cycleStartTime,
                 const scalar binDeltaT
             ) const;
+
+            //- Companion write: dump only the current-phase bin's PA
+            //  field into the solver's current time directory (no
+            //  phase-aligned sub-directories). Paired with an
+            //  instantaneous snapshot in the same time dir.
+            void writeCompanion
+            (
+                const Time& time,
+                const label currentBinIndex
+            ) const;
         };
 
         //- Hash tables of bin items for different field types
@@ -176,8 +199,12 @@ class BBPA
         //- Accumulate all fields for current time step
         void accumulateAllFields(const label binI, const scalar dt);
 
-        //- Write all phase-averaged fields
+        //- Write all phase-averaged fields (Strategy B: I dirs)
         void writeAllAveragedFields();
+
+        //- Companion write: one bin (current phase) into solver's
+        //  current time directory, for all tracked fields
+        void writeCompanionAllFields();
 
 
 public:

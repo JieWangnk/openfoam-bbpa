@@ -291,6 +291,42 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields()
 }
 
 
+void Foam::functionObjects::BBPA::writeCompanionAllFields()
+{
+    // Companion mode: write only the current-phase bin for every
+    // tracked field, into the solver's current time directory.
+    forAllConstIter
+    (
+        HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter
+    )
+    {
+        iter()->writeCompanion(time_, currentBin_);
+    }
+    forAllConstIter
+    (
+        HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter
+    )
+    {
+        iter()->writeCompanion(time_, currentBin_);
+    }
+    forAllConstIter
+    (
+        HashTable<autoPtr<binItem<symmTensor>>>,
+        symmTensorBinItems_, iter
+    )
+    {
+        iter()->writeCompanion(time_, currentBin_);
+    }
+    forAllConstIter
+    (
+        HashTable<autoPtr<binItem<tensor>>>, tensorBinItems_, iter
+    )
+    {
+        iter()->writeCompanion(time_, currentBin_);
+    }
+}
+
+
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
 Foam::functionObjects::BBPA::BBPA
@@ -344,6 +380,13 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     nBins_ = dict.lookupOrDefault("nBins", 100);
     cycles_ = dict.lookupOrDefault("cycles", -1);
     startCycle_ = dict.lookupOrDefault("startCycle", 0);
+
+    // Output mode: "phaseAlignedDirs" (default, Strategy B),
+    // "companion" (one bin into solver's time dir), or "both".
+    writeMode_ = dict.lookupOrDefault<word>
+    (
+        "writeMode", word("phaseAlignedDirs")
+    );
 
     // Phase origin: explicit override or auto-align to nearest
     // cycle boundary at or before the current time.
@@ -431,9 +474,29 @@ bool Foam::functionObjects::BBPA::execute()
 
 bool Foam::functionObjects::BBPA::write()
 {
-    Info<< type() << " " << name() << " write:" << nl;
+    Info<< type() << " " << name() << " write (mode="
+        << writeMode_ << "):" << nl;
 
-    writeAllAveragedFields();
+    const bool isLastWrite =
+        (time_.value() + 0.5*time_.deltaT().value() >= time_.endTime().value());
+
+    if (writeMode_ == "companion")
+    {
+        writeCompanionAllFields();
+    }
+    else if (writeMode_ == "both")
+    {
+        writeCompanionAllFields();
+        if (isLastWrite)
+        {
+            writeAllAveragedFields();
+        }
+    }
+    else
+    {
+        // default: "phaseAlignedDirs" (Strategy B, back-compat)
+        writeAllAveragedFields();
+    }
 
     // Checkpoint: save scalar counters so the run can be restarted.
     // The meanFields_ and M2Fields_ are written by AUTO_WRITE; this

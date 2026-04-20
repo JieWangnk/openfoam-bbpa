@@ -398,6 +398,66 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
 }
 
 
+template<class Type>
+void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
+(
+    const Time& time,
+    const label currentBinIndex
+) const
+{
+    // Companion write: one phase (the current bin) into the solver's
+    // current time directory. Intended to be paired with the solver's
+    // own instantaneous field write at the same time, giving the
+    // reader both U and U_PA in the same directory.
+    const label binI = currentBinIndex;
+    if (binI < 0 || binI >= meanFields_.size()) return;
+
+    const bool hasCrossData = binCounts_[binI] > 0;
+    const bool hasCurrentData = currentCycleBinTime_[binI] > 0;
+    if (!hasCrossData && !hasCurrentData) return;
+
+    const fvMesh& mesh = meanFields_[0].mesh();
+    const word solverTimeName = time.timeName(time.value());
+
+    // Build PA field for this bin, labelled with solver's current
+    // time (not the phase-aligned time).
+    FieldType paField
+    (
+        IOobject
+        (
+            fieldName_ + "_PA",
+            solverTimeName,
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE,
+            false
+        ),
+        meanFields_[binI]
+    );
+
+    if (hasCrossData && hasCurrentData)
+    {
+        const scalar inv = 1.0 / currentCycleBinTime_[binI];
+        const scalar nOld = binCounts_[binI];
+        const scalar total = nOld + 1.0;
+        paField.primitiveFieldRef() =
+            (
+                meanFields_[binI].primitiveField() * nOld
+              + currentCycleBinSum_[binI].primitiveField() * inv
+            ) / total;
+    }
+    else if (!hasCrossData)
+    {
+        const scalar inv = 1.0 / currentCycleBinTime_[binI];
+        paField.primitiveFieldRef() =
+            currentCycleBinSum_[binI].primitiveField() * inv;
+    }
+
+    mkDir(paField.objectPath().path());
+    paField.regIOobject::write();
+}
+
+
 // Explicit instantiation for common types
 template struct Foam::functionObjects::BBPA::binItem<Foam::scalar>;
 template struct Foam::functionObjects::BBPA::binItem<Foam::vector>;
