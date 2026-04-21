@@ -54,6 +54,16 @@ namespace Foam
 namespace functionObjects
 {
 
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+//  Trait: type of phi*phi for the second-moment accumulator.
+//    scalar     -> scalar      (<p*p>)
+//    vector     -> symmTensor  (<U*U> = 6-component Reynolds stress tensor)
+//    symmTensor -> symmTensor
+//    tensor     -> tensor
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+template<class T> struct bbpaSqrTypeOf { typedef T type; };
+template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
+
 /*---------------------------------------------------------------------------*\
                           Class BBPA Declaration
 \*---------------------------------------------------------------------------*/
@@ -115,6 +125,8 @@ class BBPA
         struct binItem
         {
             typedef GeometricField<Type, fvPatchField, volMesh> FieldType;
+            typedef typename bbpaSqrTypeOf<Type>::type SqrType;
+            typedef GeometricField<SqrType, fvPatchField, volMesh> SqrFieldType;
 
             word fieldName_;
             label nCycles_;
@@ -133,13 +145,14 @@ class BBPA
             //- Current cycle: time-weighted sum for each bin
             PtrList<FieldType> currentCycleBinSum_;
 
-            //- Cross-cycle running mean of <|u|^2> per bin. Combined with
-            //  meanFields_ gives true resolved turbulent kinetic energy:
-            //    TKE(bin) = 0.5 * ( meanUUFields_[bin] - magSqr(meanFields_[bin]) )
-            PtrList<volScalarField> meanUUFields_;
+            //- Cross-cycle running mean of <phi*phi> per bin. For a vector
+            //  field this is the full 6-component <U_i U_j> tensor; the
+            //  Reynolds stress follows as <U_i U_j> - <U_i><U_j> and TKE
+            //  as 0.5 * trace of that. For a scalar it reduces to <p*p>.
+            PtrList<SqrFieldType> meanSqrFields_;
 
-            //- Current cycle: time-weighted sum of |u|^2 for each bin
-            PtrList<volScalarField> currentCycleBinUUSum_;
+            //- Current cycle: time-weighted sum of (phi*phi) for each bin
+            PtrList<SqrFieldType> currentCycleBinSqrSum_;
 
             binItem(const word& name, const fvMesh& mesh, const label nBins);
 
@@ -172,11 +185,13 @@ class BBPA
             ) const;
         };
 
-        //- Hash tables of bin items for different field types
+        //- Hash tables of bin items for different field types.
+        //  BBPA tracks volScalarFields (e.g. pressure) and volVectorFields
+        //  (e.g. velocity, wall shear stress). Tensor-valued fields are
+        //  not supported because the second-moment accumulator phi*phi is
+        //  not defined for generic tensor fields in OpenFOAM.
         HashTable<autoPtr<binItem<scalar>>> scalarBinItems_;
         HashTable<autoPtr<binItem<vector>>> vectorBinItems_;
-        HashTable<autoPtr<binItem<symmTensor>>> symmTensorBinItems_;
-        HashTable<autoPtr<binItem<tensor>>> tensorBinItems_;
 
 
     // Private Member Functions

@@ -72,8 +72,6 @@ void Foam::functionObjects::BBPA::initializeBinItems()
         (
             scalarBinItems_.found(fieldName)
          || vectorBinItems_.found(fieldName)
-         || symmTensorBinItems_.found(fieldName)
-         || tensorBinItems_.found(fieldName)
         )
         {
             continue;
@@ -101,30 +99,11 @@ void Foam::functionObjects::BBPA::initializeBinItems()
                 )
             );
         }
-        else if (mesh_.foundObject<volSymmTensorField>(fieldName))
-        {
-            symmTensorBinItems_.insert
-            (
-                fieldName,
-                autoPtr<binItem<symmTensor>>
-                (
-                    new binItem<symmTensor>(fieldName, mesh_, nBins_)
-                )
-            );
-        }
-        else if (mesh_.foundObject<volTensorField>(fieldName))
-        {
-            tensorBinItems_.insert
-            (
-                fieldName,
-                autoPtr<binItem<tensor>>
-                (
-                    new binItem<tensor>(fieldName, mesh_, nBins_)
-                )
-            );
-        }
-        // Silently skip fields not yet registered; they'll be retried
-        // on the next execute() call.
+        // Other field types (symmTensor, tensor) are not supported: the
+        // second-moment accumulator phi*phi isn't defined in OpenFOAM for
+        // generic tensor fields. Silently skip unknown or unsupported
+        // fields; they'll be retried on the next execute() call in case
+        // a vector/scalar version appears.
     }
 }
 
@@ -139,19 +118,6 @@ void Foam::functionObjects::BBPA::resetAllBinsForNewCycle()
     {
         iter()->resetCurrentCycle();
     }
-    forAllIter
-    (
-        HashTable<autoPtr<binItem<symmTensor>>>,
-        symmTensorBinItems_,
-        iter
-    )
-    {
-        iter()->resetCurrentCycle();
-    }
-    forAllIter(HashTable<autoPtr<binItem<tensor>>>, tensorBinItems_, iter)
-    {
-        iter()->resetCurrentCycle();
-    }
 }
 
 
@@ -162,19 +128,6 @@ void Foam::functionObjects::BBPA::finalizeAllForCycle()
         iter()->finalizeCycle();
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
-    {
-        iter()->finalizeCycle();
-    }
-    forAllIter
-    (
-        HashTable<autoPtr<binItem<symmTensor>>>,
-        symmTensorBinItems_,
-        iter
-    )
-    {
-        iter()->finalizeCycle();
-    }
-    forAllIter(HashTable<autoPtr<binItem<tensor>>>, tensorBinItems_, iter)
     {
         iter()->finalizeCycle();
     }
@@ -200,27 +153,6 @@ void Foam::functionObjects::BBPA::accumulateAllFields
         const word& fieldName = iter.key();
         const volVectorField& field =
             mesh_.lookupObject<volVectorField>(fieldName);
-        iter()->accumulate(binI, field, dt);
-    }
-
-    forAllIter
-    (
-        HashTable<autoPtr<binItem<symmTensor>>>,
-        symmTensorBinItems_,
-        iter
-    )
-    {
-        const word& fieldName = iter.key();
-        const volSymmTensorField& field =
-            mesh_.lookupObject<volSymmTensorField>(fieldName);
-        iter()->accumulate(binI, field, dt);
-    }
-
-    forAllIter(HashTable<autoPtr<binItem<tensor>>>, tensorBinItems_, iter)
-    {
-        const word& fieldName = iter.key();
-        const volTensorField& field =
-            mesh_.lookupObject<volTensorField>(fieldName);
         iter()->accumulate(binI, field, dt);
     }
 }
@@ -260,34 +192,6 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields()
             cycleStart, binDeltaT_
         );
     }
-
-    forAllConstIter
-    (
-        HashTable<autoPtr<binItem<symmTensor>>>,
-        symmTensorBinItems_,
-        iter
-    )
-    {
-        iter()->write
-        (
-            time_, nBins_, currentCycle_, currentBin_,
-            cycleStart, binDeltaT_
-        );
-    }
-
-    forAllConstIter
-    (
-        HashTable<autoPtr<binItem<tensor>>>,
-        tensorBinItems_,
-        iter
-    )
-    {
-        iter()->write
-        (
-            time_, nBins_, currentCycle_, currentBin_,
-            cycleStart, binDeltaT_
-        );
-    }
 }
 
 
@@ -305,21 +209,6 @@ void Foam::functionObjects::BBPA::writeCompanionAllFields()
     forAllConstIter
     (
         HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter
-    )
-    {
-        iter()->writeCompanion(time_, currentBin_);
-    }
-    forAllConstIter
-    (
-        HashTable<autoPtr<binItem<symmTensor>>>,
-        symmTensorBinItems_, iter
-    )
-    {
-        iter()->writeCompanion(time_, currentBin_);
-    }
-    forAllConstIter
-    (
-        HashTable<autoPtr<binItem<tensor>>>, tensorBinItems_, iter
     )
     {
         iter()->writeCompanion(time_, currentBin_);
@@ -349,9 +238,7 @@ Foam::functionObjects::BBPA::BBPA
     currentBin_(-1),
     previousBin_(-1),
     scalarBinItems_(),
-    vectorBinItems_(),
-    symmTensorBinItems_(),
-    tensorBinItems_()
+    vectorBinItems_()
 {
     read(dict);
     initializeBinItems();
@@ -546,31 +433,6 @@ bool Foam::functionObjects::BBPA::write()
             fieldDict.add("binCounts", iter()->binCounts_);
             propsDict.add(iter.key(), fieldDict);
         }
-        forAllConstIter
-        (
-            HashTable<autoPtr<binItem<symmTensor>>>,
-            symmTensorBinItems_,
-            iter
-        )
-        {
-            dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
-            propsDict.add(iter.key(), fieldDict);
-        }
-        forAllConstIter
-        (
-            HashTable<autoPtr<binItem<tensor>>>,
-            tensorBinItems_,
-            iter
-        )
-        {
-            dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
-            propsDict.add(iter.key(), fieldDict);
-        }
-
         propsDict.regIOobject::write();
     }
 

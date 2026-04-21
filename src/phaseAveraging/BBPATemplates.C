@@ -29,6 +29,48 @@ License
 #include "OFstream.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+//  writePAField: write a volField to a phase-aligned time directory using an
+//  explicit OFstream. regIOobject::write() in OpenFOAM is hard-wired to the
+//  current solver time: writing with instance != time.timeName() silently
+//  fails for time dirs that don't match a solver writeTime. This helper
+//  bypasses that restriction by constructing the path explicitly and writing
+//  the full FoamFile format (header + data) via an OFstream. It handles the
+//  parallel case (prepending processorN to the path) and the serial case.
+//
+//  This is a function-object-local write; the file does not register with
+//  the objectRegistry, so repeated writes are idempotent.
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+template<class FieldT>
+static void writePAField
+(
+    const FieldT& paField,
+    const Foam::fvMesh& mesh,
+    const Foam::word& binTimeName
+)
+{
+    Foam::fileName caseDir =
+        mesh.time().rootPath() / mesh.time().caseName();
+
+    Foam::fileName timeDir;
+    if (Foam::Pstream::parRun())
+    {
+        timeDir = caseDir
+            / ("processor" + Foam::name(Foam::Pstream::myProcNo()))
+            / binTimeName;
+    }
+    else
+    {
+        timeDir = caseDir / binTimeName;
+    }
+    Foam::mkDir(timeDir);
+
+    Foam::OFstream os(timeDir / paField.name());
+    paField.regIOobject::writeHeader(os);
+    os << paField;
+    Foam::IOobject::writeEndDivider(os);
+}
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 template<class Type>
 Foam::functionObjects::BBPA::binItem<Type>::binItem
@@ -45,8 +87,8 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     M2Fields_(nBins),
     currentCycleBinTime_(nBins, 0.0),
     currentCycleBinSum_(nBins),
-    meanUUFields_(nBins),
-    currentCycleBinUUSum_(nBins)
+    meanSqrFields_(nBins),
+    currentCycleBinSqrSum_(nBins)
 {
     // Look up field to get dimensions
     const FieldType& field = mesh.lookupObject<FieldType>(name);
@@ -110,14 +152,14 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        meanUUFields_.set
+        meanSqrFields_.set
         (
             binI,
-            new volScalarField
+            new SqrFieldType
             (
                 IOobject
                 (
-                    name + "_meanUU_bin" + Foam::name(binI),
+                    name + "_meanSqr_bin" + Foam::name(binI),
                     mesh.time().name(),
                     mesh,
                     IOobject::READ_IF_PRESENT,
@@ -125,18 +167,18 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
                     false
                 ),
                 mesh,
-                dimensionedScalar(sqr(field.dimensions()), Zero)
+                dimensioned<SqrType>(sqr(field.dimensions()), Zero)
             )
         );
 
-        currentCycleBinUUSum_.set
+        currentCycleBinSqrSum_.set
         (
             binI,
-            new volScalarField
+            new SqrFieldType
             (
                 IOobject
                 (
-                    name + "_currentBinUU_bin" + Foam::name(binI),
+                    name + "_currentBinSqr_bin" + Foam::name(binI),
                     mesh.time().name(),
                     mesh,
                     IOobject::NO_READ,
@@ -144,7 +186,7 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
                     false
                 ),
                 mesh,
-                dimensionedScalar(sqr(field.dimensions()), Zero)
+                dimensioned<SqrType>(sqr(field.dimensions()), Zero)
             )
         );
 
@@ -164,8 +206,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::resetCurrentCycle()
     {
         currentCycleBinSum_[binI] =
             dimensioned<Type>(currentCycleBinSum_[binI].dimensions(), Zero);
-        currentCycleBinUUSum_[binI] =
-            dimensionedScalar(currentCycleBinUUSum_[binI].dimensions(), Zero);
+        currentCycleBinSqrSum_[binI] =
+            dimensioned<SqrType>(currentCycleBinSqrSum_[binI].dimensions(), Zero);
     }
 }
 
@@ -178,10 +220,13 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
     const scalar dt
 )
 {
-    // Time-weighted accumulation: phi(t) * dt, and |u|^2 * dt for TKE
+    // Time-weighted accumulation: phi(t)*dt (first moment) and
+    // sqr(phi(t))*dt (second moment). For vector phi, sqr() returns
+    // a symmTensor (phi_i phi_j) enabling full Reynolds-stress recovery
+    // offline. For scalar phi, sqr() is the scalar square.
     currentCycleBinTime_[binI] += dt;
     currentCycleBinSum_[binI] += dt * field;
-    currentCycleBinUUSum_[binI] += dt * magSqr(field);
+    currentCycleBinSqrSum_[binI] += dt * sqr(field);
 }
 
 
@@ -198,8 +243,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
             const FieldType cycleMean =
                 currentCycleBinSum_[binI] / currentCycleBinTime_[binI];
 
-            const volScalarField cycleMeanUU =
-                currentCycleBinUUSum_[binI] / currentCycleBinTime_[binI];
+            const SqrFieldType cycleMeanSqr =
+                currentCycleBinSqrSum_[binI] / currentCycleBinTime_[binI];
 
             binCounts_[binI] += 1.0;
             const scalar count = binCounts_[binI];
@@ -207,7 +252,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
             if (count < 1.5)
             {
                 meanFields_[binI] = cycleMean;
-                meanUUFields_[binI] = cycleMeanUU;
+                meanSqrFields_[binI] = cycleMeanSqr;
                 M2Fields_[binI] = dimensionedScalar(M2Fields_[binI].dimensions(), 0);
             }
             else
@@ -224,12 +269,12 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
 
                 M2Fields_[binI] += 0.5*(magSqr(delta) + magSqr(delta2));
 
-                // Running cross-cycle mean of <|u|^2>_bin: time-weighted
-                // intra-bin second moment, then ensemble-averaged over
-                // cycles. Combined with meanFields_ this yields the true
-                // LES resolved TKE per phase bin.
-                meanUUFields_[binI] =
-                    (meanUUFields_[binI] * (count - 1.0) + cycleMeanUU) / count;
+                // Running cross-cycle mean of <phi*phi>_bin. Combined
+                // with meanFields_ this recovers Reynolds stress
+                // R_ij = <U_i U_j> - <U_i><U_j> and TKE = 0.5 trace(R)
+                // offline from the written fields.
+                meanSqrFields_[binI] =
+                    (meanSqrFields_[binI] * (count - 1.0) + cycleMeanSqr) / count;
             }
         }
     }
@@ -295,8 +340,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                     currentCycleBinSum_[binI].primitiveField() * inv;
             }
 
-            mkDir(paField.objectPath().path());
-            paField.regIOobject::write();
+            writePAField(paField, mesh, binTimeName);
 
             binsWritten++;
 
@@ -317,24 +361,22 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                     M2Fields_[binI] / (binCounts_[binI] - 1.0)
                 );
 
-                mkDir(paVariance.objectPath().path());
-                paVariance.regIOobject::write();
+                writePAField(paVariance, mesh, binTimeName);
             }
 
-            // True LES resolved TKE per phase bin:
-            //   TKE = 0.5 * ( <|u|^2>_bin - |<u>_bin|^2 )
-            // Fires whenever we have data, either from a finalised cycle
-            // (hasCrossData) or an in-progress one (hasCurrentData). The
-            // partial-cycle fall-through avoids a silent miss when the
-            // simulation endTime lands exactly on a cycle boundary (the
-            // cycle-transition finalisation never runs in that case).
+            // Second-moment output: <phi*phi>_bin as a phase-aligned field.
+            // For vector U this is the 6-component symmetric tensor
+            // <U_i U_j> from which the Reynolds stress R_ij =
+            // <U_i U_j> - <U_i><U_j> and TKE = 0.5*trace(R) are computed
+            // offline. For scalar p this reduces to <p*p>.
+            // Fires whenever we have data (finalised or in-progress bin).
             if (hasCrossData || hasCurrentData)
             {
-                volScalarField paTKE
+                SqrFieldType paUU
                 (
                     IOobject
                     (
-                        fieldName_ + "_PATKE",
+                        fieldName_ + "_PA_UU",
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,
@@ -342,49 +384,35 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                         false
                     ),
                     mesh,
-                    dimensionedScalar(meanUUFields_[binI].dimensions(), Zero)
+                    dimensioned<SqrType>(meanSqrFields_[binI].dimensions(), Zero)
                 );
 
                 if (hasCrossData && hasCurrentData)
                 {
-                    // Blend finalised cross-cycle stats with current cycle,
-                    // matching the weighting used for _PA above.
+                    // Blend finalised cross-cycle stats with current cycle.
                     const scalar invT = 1.0 / currentCycleBinTime_[binI];
                     const scalar nOld = binCounts_[binI];
                     const scalar total = nOld + 1.0;
-                    const scalarField meanUU =
+                    paUU.primitiveFieldRef() =
                         (
-                            meanUUFields_[binI].primitiveField() * nOld
-                          + currentCycleBinUUSum_[binI].primitiveField() * invT
+                            meanSqrFields_[binI].primitiveField() * nOld
+                          + currentCycleBinSqrSum_[binI].primitiveField() * invT
                         ) / total;
-                    paTKE.primitiveFieldRef() =
-                        0.5 * (meanUU - magSqr(paField.primitiveField()));
                 }
                 else if (hasCrossData)
                 {
-                    paTKE.primitiveFieldRef() =
-                        0.5 *
-                        (
-                            meanUUFields_[binI].primitiveField()
-                          - magSqr(meanFields_[binI].primitiveField())
-                        );
+                    paUU.primitiveFieldRef() =
+                        meanSqrFields_[binI].primitiveField();
                 }
                 else
                 {
-                    // Partial-cycle only: single-realisation TKE.
-                    // Statistically noisier than N>=2 but mathematically
-                    // valid (identity holds at any N).
+                    // Partial-cycle only: single-realisation second moment.
                     const scalar invT = 1.0 / currentCycleBinTime_[binI];
-                    paTKE.primitiveFieldRef() =
-                        0.5 *
-                        (
-                            currentCycleBinUUSum_[binI].primitiveField() * invT
-                          - magSqr(paField.primitiveField())
-                        );
+                    paUU.primitiveFieldRef() =
+                        currentCycleBinSqrSum_[binI].primitiveField() * invT;
                 }
 
-                mkDir(paTKE.objectPath().path());
-                paTKE.regIOobject::write();
+                writePAField(paUU, mesh, binTimeName);
             }
         }
     }
@@ -461,8 +489,9 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
 // Explicit instantiation for common types
 template struct Foam::functionObjects::BBPA::binItem<Foam::scalar>;
 template struct Foam::functionObjects::BBPA::binItem<Foam::vector>;
-template struct Foam::functionObjects::BBPA::binItem<Foam::symmTensor>;
-template struct Foam::functionObjects::BBPA::binItem<Foam::tensor>;
+// Tensor/symmTensor instantiations removed: OpenFOAM doesn't provide a
+// generic sqr(tensor) primitive, and BBPA is only used for volScalarField
+// (e.g. pressure) and volVectorField (e.g. velocity, wallShearStress).
 
 
 // ************************************************************************* //
