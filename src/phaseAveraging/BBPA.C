@@ -28,6 +28,7 @@ License
 #include "Time.H"
 #include "addToRunTimeSelectionTable.H"
 #include "timeIOdictionary.H"
+#include "IFstream.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -84,7 +85,10 @@ void Foam::functionObjects::BBPA::initializeBinItems()
                 fieldName,
                 autoPtr<binItem<scalar>>
                 (
-                    new binItem<scalar>(fieldName, mesh_, nBins_)
+                    new binItem<scalar>
+                    (
+                        fieldName, mesh_, nBins_, binsOfInterest_
+                    )
                 )
             );
         }
@@ -95,7 +99,10 @@ void Foam::functionObjects::BBPA::initializeBinItems()
                 fieldName,
                 autoPtr<binItem<vector>>
                 (
-                    new binItem<vector>(fieldName, mesh_, nBins_)
+                    new binItem<vector>
+                    (
+                        fieldName, mesh_, nBins_, binsOfInterest_
+                    )
                 )
             );
         }
@@ -243,10 +250,11 @@ Foam::functionObjects::BBPA::BBPA
     read(dict);
     initializeBinItems();
 
-    // Checkpoint restore: meanFields_ and M2Fields_ are restored via
-    // READ_IF_PRESENT in their IOobject constructors. Scalar counters
-    // (nCycles, binCounts) are restored from the Properties file if present.
-    // TODO: implement Properties file read for scalar counters on restart.
+    // Checkpoint restore.  Reads <name>Properties and the
+    // phase-aligned _PA / _PAVariance / _PA_UU fields from the most
+    // recent solver writeTime to reconstruct the internal accumulator
+    // state.  No-op on cold start (no Properties file found).
+    readCheckpoint();
 }
 
 
@@ -267,6 +275,24 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     nBins_ = dict.lookupOrDefault("nBins", 100);
     cycles_ = dict.lookupOrDefault("cycles", -1);
     startCycle_ = dict.lookupOrDefault("startCycle", 0);
+
+    // Optional sparse-bin mode: only track the listed bin indices.
+    // Default empty list = track all nBins_ bins (original behaviour).
+    binsOfInterest_ =
+        dict.lookupOrDefault<labelList>("binsOfInterest", labelList());
+
+    // Validate any supplied bin indices against [0, nBins_).
+    forAll(binsOfInterest_, k)
+    {
+        const label b = binsOfInterest_[k];
+        if (b < 0 || b >= nBins_)
+        {
+            FatalErrorInFunction
+                << "binsOfInterest entry " << b
+                << " is out of range [0," << nBins_ << ")"
+                << exit(FatalError);
+        }
+    }
 
     // Output mode: "phaseAlignedDirs" (default, Strategy B),
     // "companion" (one bin into solver's time dir), or "both".
@@ -296,7 +322,17 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         << "    Phase origin: " << startTime_ << " s" << nl
         << "    Number of cycles: "
         << (cycles_ == -1 ? "unlimited" : Foam::name(cycles_)) << nl
-        << "    Fields: " << fieldNames_ << endl;
+        << "    Fields: " << fieldNames_ << nl
+        << "    Bin mode: "
+        << (binsOfInterest_.empty()
+                ? word("all " + Foam::name(nBins_) + " bins")
+                : word("sparse, "
+                     + Foam::name(binsOfInterest_.size()) + " bins"))
+        << endl;
+    if (!binsOfInterest_.empty())
+    {
+        Info<< "    binsOfInterest: " << binsOfInterest_ << endl;
+    }
 
     return true;
 }
@@ -437,6 +473,148 @@ bool Foam::functionObjects::BBPA::write()
     }
 
     return true;
+}
+
+
+void Foam::functionObjects::BBPA::readCheckpoint()
+{
+    // Look for the Properties file in any uniform/ subdir, latest first.
+    // findInstance returns the time directory containing the file, or
+    // throws if missing -- so we ask it to be quiet about a missing
+    // file via NO_READ_IF_PRESENT semantics by checking explicitly.
+    const word propsName = name() + "Properties";
+
+    // Search all time dirs in the registry, take the latest
+    // that contains "uniform/<propsName>".  Using direct
+    // filesystem checks rather than IOobject::typeHeaderOk so we
+    // never require constructing the dictionary at the wrong time
+    // instance.
+    fileName propsInstance;
+    {
+        const fileName casePath = obr_.time().path();
+        const instantList times = obr_.time().times();
+        forAllReverse(times, i)
+        {
+            const fileName candidate =
+                casePath / times[i].name() / "uniform" / propsName;
+            if (Foam::isFile(candidate))
+            {
+                propsInstance = times[i].name();
+                break;
+            }
+        }
+
+        if (propsInstance.empty())
+        {
+            Info<< type() << " " << name()
+                << ": no checkpoint Properties found; cold start."
+                << endl;
+            return;
+        }
+    }
+
+    // Construct the full processor-local path directly from the
+    // already-verified casePath (== obr_.time().path(), which is
+    // processor-aware in parallel runs).  Going through
+    // IOdictionary(IOobject(..., obr_, MUST_READ)) here was
+    // resolving to the case-level path and crashing in parallel.
+    const fileName propsFullPath =
+        obr_.time().path() / propsInstance / "uniform" / propsName;
+
+    Info<< type() << " " << name()
+        << ": restoring checkpoint state from "
+        << propsFullPath << endl;
+
+    // Read directly via IFstream + dictionary -- bypasses the IOobject
+    // path-resolution machinery that mishandles uniform/ in parallel.
+    IFstream propsFile(propsFullPath);
+    if (!propsFile.good())
+    {
+        WarningInFunction
+            << "Could not open " << propsFullPath
+            << " for read; falling back to cold start." << endl;
+        return;
+    }
+    dictionary propsDict(propsFile);
+
+    // Scalar counters.  Phase origin always taken from the checkpoint:
+    // a manual dict override after a restart would desynchronise the
+    // accumulator state (which was indexed against the saved
+    // startTime_) and is therefore not honoured here.
+    startTime_ = propsDict.lookup<scalar>("startTime");
+    currentCycle_ = propsDict.lookup<label>("currentCycle");
+    previousCycle_ = propsDict.lookup<label>("previousCycle");
+
+    // Per-field counters.
+    forAllIter
+    (
+        HashTable<autoPtr<binItem<scalar>>>,
+        scalarBinItems_,
+        iter
+    )
+    {
+        const word& fname = iter.key();
+        if (propsDict.found(fname))
+        {
+            const dictionary& fd = propsDict.subDict(fname);
+            iter()->nCycles_ = fd.lookup<label>("nCycles");
+            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+        }
+    }
+    forAllIter
+    (
+        HashTable<autoPtr<binItem<vector>>>,
+        vectorBinItems_,
+        iter
+    )
+    {
+        const word& fname = iter.key();
+        if (propsDict.found(fname))
+        {
+            const dictionary& fd = propsDict.subDict(fname);
+            iter()->nCycles_ = fd.lookup<label>("nCycles");
+            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+        }
+    }
+
+    // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
+    // phase-aligned _PA / _PAVariance / _PA_UU files.  At the most
+    // recent writeTime (just after cycle finalisation), the public
+    // bin fields satisfy:
+    //
+    //     <name>_PA[binI]         at t = cycleStart + binI*binDeltaT
+    //                              = meanFields_[binI]
+    //     <name>_PAVariance[binI] at the same t
+    //                              = M2Fields_[binI] / (nCycles - 1)
+    //     <name>_PA_UU[binI]      at the same t
+    //                              = meanSqrFields_[binI]
+    //
+    // Restore by reading from the appropriate phase-aligned dirs.
+    const scalar cycleStart =
+        startTime_ + currentCycle_ * period_;
+
+    forAllIter
+    (
+        HashTable<autoPtr<binItem<scalar>>>,
+        scalarBinItems_,
+        iter
+    )
+    {
+        restoreBinItemFromDisk(*(iter()), iter.key(), cycleStart);
+    }
+    forAllIter
+    (
+        HashTable<autoPtr<binItem<vector>>>,
+        vectorBinItems_,
+        iter
+    )
+    {
+        restoreBinItemFromDisk(*(iter()), iter.key(), cycleStart);
+    }
+
+    Info<< "    Restored: startTime=" << startTime_
+        << "  currentCycle=" << currentCycle_
+        << "  previousCycle=" << previousCycle_ << endl;
 }
 
 

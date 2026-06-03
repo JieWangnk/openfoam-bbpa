@@ -93,7 +93,33 @@ functions
         startCycle      3;        // Skip first 3 cycles for flow development
         cycles          20;       // Average 20 cycles
     }
-    
+
+    // --- Sparse-bin mode (optional) -----------------------------------
+    // Track only a few phase bins of interest at a large nBins, so the
+    // in-memory cost scales with the number of listed bins instead of
+    // with nBins. Useful for e.g. capturing peak systole and post-peak
+    // deceleration at high phase resolution without holding all I bins.
+    //   - Omit binsOfInterest (or give an empty list) for the original
+    //     full-bin behaviour: all nBins bins are tracked.
+    //   - When present, ONLY the listed bin indices are allocated and
+    //     written; all other bins are skipped (no extra cost/output).
+    // Bin index for phase phi is floor(phi/binDeltaT), binDeltaT=period/nBins.
+    BBPA_sparse
+    {
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+        writeMode       both;
+
+        fields          (U p wallShearStress);
+        period          0.5;      // cardiac period (120 bpm)
+        nBins           1000;     // fine phase resolution
+        binsOfInterest  (320 400); // phi=0.16 (peak), phi=0.20 (decel) only
+        startCycle      0;
+    }
+
     // Direct comparison: Replace binBasedPhaseAverage with BBPA
     // OLD (flawed sample averaging):
     // binBasedPhaseAverage1 { type binBasedPhaseAverage; ... }

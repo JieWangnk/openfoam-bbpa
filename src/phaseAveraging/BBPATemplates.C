@@ -77,7 +77,8 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
 (
     const word& name,
     const fvMesh& mesh,
-    const label nBins
+    const label nBins,
+    const labelList& activeBins
 )
 :
     fieldName_(name),
@@ -93,8 +94,25 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     // Look up field to get dimensions
     const FieldType& field = mesh.lookupObject<FieldType>(name);
 
+    // Determine which bins to allocate. An EMPTY activeBins list means
+    // "all bins" (original behaviour); a non-empty list activates only
+    // the listed bins, leaving the rest as null PtrList entries that the
+    // accumulate / finalize / write paths skip.
+    boolList isActive(nBins, activeBins.empty());
+    forAll(activeBins, k)
+    {
+        isActive[activeBins[k]] = true;
+    }
+
     forAll(meanFields_, binI)
     {
+        if (!isActive[binI])
+        {
+            // Leave this bin's accumulators unallocated (null). Skipped
+            // everywhere downstream by the binCounts_/currentCycleBinTime_
+            // and PtrList::set() guards.
+            continue;
+        }
         meanFields_.set
         (
             binI,
@@ -204,6 +222,9 @@ void Foam::functionObjects::BBPA::binItem<Type>::resetCurrentCycle()
 
     forAll(currentCycleBinSum_, binI)
     {
+        // Skip bins not allocated in sparse-bin mode.
+        if (!currentCycleBinSum_.set(binI)) continue;
+
         currentCycleBinSum_[binI] =
             dimensioned<Type>(currentCycleBinSum_[binI].dimensions(), Zero);
         currentCycleBinSqrSum_[binI] =
@@ -220,6 +241,11 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
     const scalar dt
 )
 {
+    // Sparse-bin mode: if the current phase lands in a bin that was not
+    // allocated, do nothing -- and crucially do NOT touch
+    // currentCycleBinTime_, so finalizeCycle()/write() skip it too.
+    if (!currentCycleBinSum_.set(binI)) return;
+
     // Time-weighted accumulation: phi(t)*dt (first moment) and
     // sqr(phi(t))*dt (second moment). For vector phi, sqr() returns
     // a symmTensor (phi_i phi_j) enabling full Reynolds-stress recovery
@@ -238,6 +264,9 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
     // Update overall statistics for each bin that has data
     forAll(currentCycleBinSum_, binI)
     {
+        // Skip bins not allocated in sparse-bin mode (also have time==0).
+        if (!currentCycleBinSum_.set(binI)) continue;
+
         if (currentCycleBinTime_[binI] > 0)
         {
             const FieldType cycleMean =
@@ -292,11 +321,22 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
     const scalar binDeltaT
 ) const
 {
-    const fvMesh& mesh = meanFields_[0].mesh();
+    // Find a mesh handle from the first ALLOCATED bin (in sparse-bin mode
+    // bin 0 may be unallocated).
+    const fvMesh* meshPtr = nullptr;
+    forAll(meanFields_, b)
+    {
+        if (meanFields_.set(b)) { meshPtr = &meanFields_[b].mesh(); break; }
+    }
+    if (meshPtr == nullptr) return;   // nothing allocated -> nothing to write
+    const fvMesh& mesh = *meshPtr;
     label binsWritten = 0;
 
     forAll(meanFields_, binI)
     {
+        // Skip bins not allocated in sparse-bin mode.
+        if (!meanFields_.set(binI)) continue;
+
         const bool hasCrossData = binCounts_[binI] > 0;
         const bool hasCurrentData = currentCycleBinTime_[binI] > 0;
 
@@ -440,11 +480,14 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
     const label binI = currentBinIndex;
     if (binI < 0 || binI >= meanFields_.size()) return;
 
+    // Sparse-bin mode: nothing to write if the current bin is not tracked.
+    if (!meanFields_.set(binI)) return;
+
     const bool hasCrossData = binCounts_[binI] > 0;
     const bool hasCurrentData = currentCycleBinTime_[binI] > 0;
     if (!hasCrossData && !hasCurrentData) return;
 
-    const fvMesh& mesh = meanFields_[0].mesh();
+    const fvMesh& mesh = meanFields_[binI].mesh();
     const word solverTimeName = time.timeName(time.value());
 
     // Build PA field for this bin, labelled with solver's current
@@ -486,12 +529,157 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
 }
 
 
+// * * * * * * * * * * * * Restore from checkpoint * * * * * * * * * * * * * //
+//
+// At restart the existing _PA / _PAVariance / _PA_UU files written
+// at the most recent solver writeTime carry the cycle-N ensemble
+// state.  Per binItem<Type>::write() at the post-finalisation cycle
+// boundary (binCounts_[binI] > 0 && currentCycleBinTime_[binI] == 0):
+//
+//     paField     = meanFields_[binI]                  (no blending)
+//     paVariance  = M2Fields_[binI] / (n - 1)          (only if n > 1)
+//     paUU        = meanSqrFields_[binI]               (no blending)
+//
+// Reverse-engineer the three internal arrays from the public outputs.
+template<class Type>
+void Foam::functionObjects::BBPA::restoreBinItemFromDisk
+(
+    binItem<Type>& bi,
+    const word& fieldName,
+    const scalar cycleStartTime
+)
+{
+    typedef typename binItem<Type>::FieldType FieldType;
+    typedef typename binItem<Type>::SqrFieldType SqrFieldType;
+
+    // Mesh handle from the first allocated bin (sparse-bin mode may
+    // leave bin 0 unallocated).
+    const fvMesh* meshPtr = nullptr;
+    forAll(bi.meanFields_, b)
+    {
+        if (bi.meanFields_.set(b)) { meshPtr = &bi.meanFields_[b].mesh(); break; }
+    }
+    if (meshPtr == nullptr) return;
+    const fvMesh& mesh = *meshPtr;
+    label restored = 0;
+
+    forAll(bi.meanFields_, binI)
+    {
+        // Skip bins not allocated in sparse-bin mode.
+        if (!bi.meanFields_.set(binI)) continue;
+
+        const scalar nCyc = bi.binCounts_[binI];
+        if (nCyc <= 0) continue;  // bin never received data
+
+        const scalar binTime = cycleStartTime + binI * binDeltaT_;
+        const word binTimeName = Time::timeName(binTime);
+
+        // 1. mean: read fieldName_PA into meanFields_[binI].
+        {
+            IOobject paIO
+            (
+                fieldName + "_PA",
+                binTimeName,
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE,
+                false
+            );
+
+            const fileName paPath =
+                mesh.time().path() / binTimeName / paIO.name();
+            if (!Foam::isFile(paPath))
+            {
+                WarningInFunction
+                    << "Checkpoint mean field missing: " << binTimeName
+                    << "/" << fieldName << "_PA -- bin " << binI
+                    << " left at cold-start zero." << endl;
+                continue;
+            }
+
+            FieldType loaded(paIO, mesh);
+            bi.meanFields_[binI].primitiveFieldRef() =
+                loaded.primitiveField();
+        }
+
+        // 2. M2: read fieldName_PAVariance and rescale by (n-1).
+        if (nCyc > 1)
+        {
+            IOobject varIO
+            (
+                fieldName + "_PAVariance",
+                binTimeName,
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE,
+                false
+            );
+
+            const fileName varPath =
+                mesh.time().path() / binTimeName / varIO.name();
+            if (Foam::isFile(varPath))
+            {
+                volScalarField loadedVar(varIO, mesh);
+                bi.M2Fields_[binI].primitiveFieldRef() =
+                    loadedVar.primitiveField() * (nCyc - 1.0);
+            }
+        }
+
+        // 3. meanSqr: read fieldName_PA_UU into meanSqrFields_[binI].
+        {
+            IOobject uuIO
+            (
+                fieldName + "_PA_UU",
+                binTimeName,
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE,
+                false
+            );
+
+            const fileName uuPath =
+                mesh.time().path() / binTimeName / uuIO.name();
+            if (Foam::isFile(uuPath))
+            {
+                SqrFieldType loadedUU(uuIO, mesh);
+                bi.meanSqrFields_[binI].primitiveFieldRef() =
+                    loadedUU.primitiveField();
+            }
+        }
+
+        restored++;
+    }
+
+    Info<< "    " << fieldName << ": restored "
+        << restored << "/" << bi.meanFields_.size()
+        << " bins from phase-aligned dirs (cycleStart="
+        << cycleStartTime << ", nCycles=" << bi.nCycles_ << ")"
+        << endl;
+}
+
+
 // Explicit instantiation for common types
 template struct Foam::functionObjects::BBPA::binItem<Foam::scalar>;
 template struct Foam::functionObjects::BBPA::binItem<Foam::vector>;
 // Tensor/symmTensor instantiations removed: OpenFOAM doesn't provide a
 // generic sqr(tensor) primitive, and BBPA is only used for volScalarField
 // (e.g. pressure) and volVectorField (e.g. velocity, wallShearStress).
+
+// Explicit instantiation of the restore helper.
+template void
+Foam::functionObjects::BBPA::restoreBinItemFromDisk<Foam::scalar>
+(
+    binItem<Foam::scalar>&,
+    const word&,
+    const scalar
+);
+template void
+Foam::functionObjects::BBPA::restoreBinItemFromDisk<Foam::vector>
+(
+    binItem<Foam::vector>&,
+    const word&,
+    const scalar
+);
 
 
 // ************************************************************************* //

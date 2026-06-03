@@ -83,6 +83,18 @@ class BBPA
         //- Number of bins per cycle
         label nBins_;
 
+        //- Optional list of bin indices to track ("sparse-bin" mode).
+        //   When empty (default) ALL nBins_ bins are allocated and
+        //   accumulated exactly as before -- the original full-bin
+        //   behaviour is unchanged. When non-empty, only the listed
+        //   bins allocate field-sized accumulators and are
+        //   accumulated/written; every other bin is skipped. This
+        //   reduces the in-memory cost from O(nBins) to
+        //   O(binsOfInterest) field-sized accumulators per tracked
+        //   variable -- useful when only a few phases (e.g. peak
+        //   systole, post-peak deceleration) are needed at large I.
+        labelList binsOfInterest_;
+
         //- Number of cycles to average (-1 for all)
         label cycles_;
 
@@ -154,7 +166,18 @@ class BBPA
             //- Current cycle: time-weighted sum of (phi*phi) for each bin
             PtrList<SqrFieldType> currentCycleBinSqrSum_;
 
-            binItem(const word& name, const fvMesh& mesh, const label nBins);
+            //- Construct. activeBins lists the bin indices that should
+            //  allocate field-sized accumulators; an EMPTY list means
+            //  "all nBins bins" (original behaviour). Non-active bins
+            //  are left as null entries in the PtrLists and are skipped
+            //  by accumulate()/finalizeCycle()/write().
+            binItem
+            (
+                const word& name,
+                const fvMesh& mesh,
+                const label nBins,
+                const labelList& activeBins
+            );
 
             void resetCurrentCycle();
             void accumulate
@@ -216,6 +239,24 @@ class BBPA
 
         //- Write all phase-averaged fields (Strategy B: I dirs)
         void writeAllAveragedFields();
+
+        //- Restore checkpoint state on restart from disk.
+        //  Reads <name>Properties (counters: startTime, currentCycle,
+        //  previousCycle, per-field nCycles + binCounts) and the
+        //  phase-aligned _PA / _PAVariance / _PA_UU fields written
+        //  at the most recent solver writeTime, reconstructing the
+        //  internal meanFields_, M2Fields_ and meanSqrFields_ arrays.
+        //  No-op when no Properties file is found (= cold start).
+        void readCheckpoint();
+
+        //- Templated helper: restore one binItem from disk.
+        template<class Type>
+        void restoreBinItemFromDisk
+        (
+            binItem<Type>& bi,
+            const word& fieldName,
+            const scalar cycleStartTime
+        );
 
         //- Companion write: one bin (current phase) into solver's
         //  current time directory, for all tracked fields
