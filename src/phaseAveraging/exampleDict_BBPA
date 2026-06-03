@@ -116,7 +116,9 @@ functions
         fields          (U p wallShearStress);
         period          0.5;      // cardiac period (120 bpm)
         nBins           1000;     // fine phase resolution
-        binsOfInterest  (320 400); // phi=0.16 (peak), phi=0.20 (decel) only
+        // bin = floor(phi*nBins); for this waveform peak systole is at
+        // t=0.08s (phi=0.16) and post-peak deceleration at t=0.10s (phi=0.20).
+        binsOfInterest  (160 200); // phi=0.16 (peak), phi=0.20 (decel) only
         startCycle      0;
     }
 
