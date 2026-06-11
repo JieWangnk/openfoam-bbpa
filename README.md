@@ -99,7 +99,7 @@ and are visibly smoother than the single instantaneous realisation.*
 ```bash
 cd tutorials/stenosisPipe
 ./Allrun                       # blockMesh -> decomposePar -> foamRun (4 cores) -> reconstructPar
-paraview case.foam &
+touch case.foam; paraview case.foam &
 ```
 
 The case runs **BBPA and IPA on the same trajectory**. BBPA uses `writeMode
