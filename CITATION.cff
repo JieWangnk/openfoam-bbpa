@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software (this repository) and the companion paper listed under preferred-citation."
+title: "openfoam-bbpa: Bin-Based Phase Averaging for OpenFOAM"
+abstract: >-
+  An OpenFOAM Foundation v12 function object that computes phase-averaged
+  statistics of periodic turbulence-resolving flows in situ: the phase mean,
+  the cross-cycle variance, and the raw second moment <U_i U_j> (from which the
+  Reynolds-stress tensor and TKE are reconstructed), without writing a transient
+  snapshot archive. Includes the classical instantaneous phase-averaging (IPA)
+  estimator and oscillating-lid and stenosis-pipe tutorials.
+type: software
+authors:
+  - family-names: Wang
+    given-names: Jie
+    affiliation: "Department of Mechanical, Aerospace and Civil Engineering, The University of Manchester"
+    email: jie.wang@manchester.ac.uk
+  - family-names: Skillen
+    given-names: Alex
+    affiliation: "The University of Manchester"
+  - family-names: Revell
+    given-names: Alistair
+    affiliation: "The University of Manchester"
+version: "1.0.0"
+date-released: "2026-06-11"
+license: GPL-3.0
+repository-code: "https://github.com/JieWangnk/openfoam-bbpa"
+keywords:
+  - OpenFOAM
+  - large-eddy simulation
+  - phase averaging
+  - pulsatile flow
+  - cardiovascular hemodynamics
+  - in-situ analysis
+preferred-citation:
+  type: article
+  title: "Bin-based in-situ phase averaging for pulsatile internal-flow LES: error budget, OpenFOAM implementation, and validation"
+  authors:
+    - family-names: Wang
+      given-names: Jie
+    - family-names: Skillen
+      given-names: Alex
+    - family-names: Revell
+      given-names: Alistair
+  journal: "Computers & Fluids"
+  year: 2026
+  notes: "submitted"

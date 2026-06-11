@@ -8,8 +8,9 @@ snapshots.
 For the theory, error analysis, and cardiovascular LES validation see the
 companion paper:
 
-> Wang, J. *Bin-Based Phase Averaging of turbulence-resolving pulsatile flows.*
-> (2026, in preparation). Paper repo:
+> Wang, J., Skillen, A., Revell, A. *Bin-based in-situ phase averaging for
+> pulsatile internal-flow LES: error budget, OpenFOAM implementation, and
+> validation.* Computers & Fluids (2026, submitted). Paper repo:
 > [`Bin-Phase-Average`](https://github.com/JieWangnk/Bin-Phase-Average)
 
 ## Features
@@ -177,9 +178,10 @@ If you use BBPA in your work, please cite the paper:
 
 ```bibtex
 @article{wang2026bbpa,
-  author = {Wang, Jie},
-  title  = {Bin-Based Phase Averaging of turbulence-resolving pulsatile flows},
-  year   = {2026},
-  note   = {in preparation}
+  author  = {Wang, Jie and Skillen, Alex and Revell, Alistair},
+  title   = {Bin-based in-situ phase averaging for pulsatile internal-flow {LES}: error budget, {OpenFOAM} implementation, and validation},
+  journal = {Computers \& Fluids},
+  year    = {2026},
+  note    = {submitted}
 }
 ```
