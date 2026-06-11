@@ -78,7 +78,49 @@ paraview case.foam &
 ```
 
 This 400-cell laminar case ends in ≈1 min and exercises the full pipeline:
-Strategy B phase-aligned output, Welford variance, TKE accumulator.
+Strategy B phase-aligned output, Welford variance, second-moment accumulator.
+
+## Quickstart — stenosis-pipe tutorial
+
+A reduced version of the paper's §3 same-trajectory validation case: a
+`D = 5` mm pipe with a cosine-tapered 75 % area constriction at the midpoint,
+driven by a sinusoidal inlet `U = 0.3 + 0.3 sin(2πt)` (period `T = 1` s),
+WALE LES. The mesh is coarsened to ≈18 k cells and the run is 3 forcing
+periods, so it completes in ~30 min on 4 cores (the paper used a 256 k-cell
+mesh over 50 cycles).
+
+![Stenosis-pipe phase animation: instantaneous vs IPA vs BBPA](docs/stenosis_phase_animation.gif)
+
+*Mid-plane `|U|` over the cardiac phase. Top: instantaneous (one realisation —
+the post-throat shear-layer jet meanders). Middle: classical pointwise IPA.
+Bottom: BBPA. IPA and BBPA are phase-averaged over the two accumulated cycles
+and are visibly smoother than the single instantaneous realisation.*
+
+```bash
+cd tutorials/stenosisPipe
+./Allrun                       # blockMesh -> decomposePar -> foamRun (4 cores) -> reconstructPar
+paraview case.foam &
+```
+
+The case runs **BBPA and IPA on the same trajectory**. BBPA uses `writeMode
+companion`, so each time directory holds the instantaneous `U` **and** that
+phase's bin `U_PA` (+ `U_PA_UU`, `U_PAVariance`) together, and the output
+reconstructs cleanly in parallel. From `U_PA_UU` and `U_PA` you get the Reynolds
+stress `R_ij = U_PA_UU - U_PA⊗U_PA` and TKE `= ½ tr(R)`. IPA writes its 50 phase
+fields `U_IPA_phase{0..49}` at the cycle ends. Both use `period 1.0`,
+`nBins`/`nPhases 50`, `startCycle 1` (first forcing period discarded as the
+start-up transient).
+
+Build the 3-panel phase animation above from the finished case with:
+
+```bash
+python3 ../../scripts/make_phase_animation.py .   # needs pyvista + imageio
+```
+
+Edit `system/decomposeParDict` to change the core count, or set
+`numberOfSubdomains 1` and replace the parallel lines in `Allrun` with
+`runApplication $(getApplication)` to run serially (then BBPA's
+`phaseAlignedDirs` mode also works without the per-processor nesting).
 
 ## Usage in your own case
 

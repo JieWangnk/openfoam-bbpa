@@ -1,0 +1,73 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+|  BBPA tutorial: reduced stenosis-pipe (18k-cell coarse mesh, 3 cycles).      |
+|  Demonstrates the BBPA and IPA function objects on a pulsatile internal      |
+|  flow, side by side. The paper's §3 validation used a 256k-cell 3D WALE-LES  |
+|  version over 50 cycles; this is a fast, coarse reproduction of the setup.   |
+|                                                                              |
+|  Runtime ~30 min on 4 cores. deltaT = 1.25e-4 divides the 0.02 s write       |
+|  interval exactly (160 steps), so time directories are clean (0.02, 0.04..). |
+|  After ./Allrun, build the phase animation with:                             |
+|      python3 ../../scripts/make_phase_animation.py .                         |
+\*---------------------------------------------------------------------------*/
+FoamFile { format ascii; class dictionary; object controlDict; }
+
+application     foamRun;
+solver          incompressibleFluid;
+
+startTime       0;
+stopAt          endTime;
+endTime         3.0;            // 3 forcing periods (T = 1 s)
+deltaT          1.25e-4;        // 0.02 / 1.25e-4 = 160 (exact -> clean write times)
+writeControl    runTime;
+writeInterval   0.02;           // 50 instantaneous frames per cycle (for the animation)
+purgeWrite      0;
+writeFormat     binary;
+timeFormat      general;
+timePrecision   8;
+runTimeModifiable false;
+adjustTimeStep  no;
+
+libs ("libPhaseAveraging.so");
+
+functions
+{
+    // Bin-Based Phase Averaging. In "companion" mode the current phase's bin
+    // (<field>_PA, plus <field>_PA_UU and <field>_PAVariance) is written into
+    // the solver's own time directory, ALONGSIDE the instantaneous fields, so
+    // every time dir holds both U and U_PA and the output reconstructs cleanly
+    // in parallel. (writeMode "phaseAlignedDirs" instead dumps all I bins to
+    // phase-aligned dirs t_j = j*T/I -- tidy in serial, but nests under
+    // processorN/ in a decomposed run; "both" does companion + a final dump.)
+    BBPA
+    {
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;   // write the current bin every solver write
+        fields          (U);
+        period          1.0;         // forcing period T
+        nBins           50;          // phase bins per cycle
+        startTime       0;
+        startCycle      1;           // discard the first (transient) cycle
+        writeMode       companion;
+    }
+
+    // Instantaneous Phase Averaging: classical pointwise estimator (one sample
+    // per cycle at each phase point), for a side-by-side comparison with BBPA.
+    // Its 50 phase fields (U_IPA_phase0..49) are written at the cycle ends.
+    IPA
+    {
+        type            IPA;
+        libs            ("libPhaseAveraging.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    runTime;
+        writeInterval   1.0;         // emit the phase set once per cycle
+        fields          (U);
+        period          1.0;
+        nPhases         50;
+        startCycle      1;
+        phaseTolerance  0.01;        // accept a sample within this of a phase point [s]
+    }
+}
