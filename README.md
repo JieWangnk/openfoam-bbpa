@@ -18,12 +18,12 @@ companion paper:
 |---|---|---|---|
 | Phase-centred ensemble mean | ✅ | ✗ (causal running filter) | ✅ |
 | In-situ (no snapshot I/O) | ✅ | ✅ | ✗ (terabytes of writes) |
-| Phase-resolved TKE | ✅ (`_PATKE`) | ✗ | ✅ (offline) |
+| Raw 2nd moment `⟨UᵢUⱼ⟩` → Reynolds stress / TKE | ✅ (`_PA_UU`, reconstructed offline) | ✗ | ✅ (offline) |
 | Cross-cycle variance | ✅ (Welford) | partial (`UPrime2Mean`) | ✅ |
 | Wall shear stress binning | ✅ (lazy init) | ✅ | ✅ |
 | Output per bin | phase-aligned time directories | single time dir | per-phase dir |
 | Memory | `O(I)` per field | `O(1)` per field | n/a |
-| Overhead (6M-cell LES, 160 cores) | **+0.13%** at I=50 | baseline | +100%+ (post-run) |
+| Overhead (8.2M-cell LES, 200 cores) | **+0.67%** at I=100 (95% CI [0.2,1.1]%) | baseline | +100%+ (post-run) |
 
 Accompanying `IPA` (Instantaneous Phase Averaging) function object samples at
 exact phase crossings without binning — a zero-width limit of BBPA for
@@ -39,11 +39,15 @@ phase-aligned time directory `t_j = t_0 + j · (T/I)`:
 |---|---|---|
 | `<φ>_PA` | Phase-average `⟨φ⟩_j` | same as `φ` |
 | `<φ>_PAVariance` | Cross-cycle variance `M₂/(N−1)` of the bin mean | `dim(φ)²` |
-| `<φ>_PATKE` | Resolved phase-ensemble TKE `½(⟨\|φ\|²⟩_j − \|⟨φ⟩_j\|²)` | `dim(φ)²` |
+| `<φ>_PA_UU` | Raw second moment `⟨φ⊗φ⟩_j` (symmetric tensor `⟨UᵢUⱼ⟩` for a vector field; `⟨φ²⟩_j` for a scalar) | `dim(φ)²` |
 
-For a vector field the `_PATKE` output is the turbulent kinetic energy
-entering the triple decomposition. For a scalar field it reduces to the
-within-bin sub-timestep variance.
+For a vector field, the Reynolds-stress tensor `R_ij = ⟨UᵢUⱼ⟩ − ⟨Uᵢ⟩⟨Uⱼ⟩`
+and the turbulent kinetic energy `k = ½ tr(R)` are reconstructed from
+`_PA_UU` and `_PA` in post-processing. (Saving the raw tensor rather than a
+pre-reduced TKE keeps the full Reynolds-stress information.) At finite `I`
+these are bin-conditioned quantities that approach the pointwise
+phase-ensemble values as `I → ∞`. For a scalar field, `_PA_UU` reduces to
+`⟨φ²⟩_j`, from which the within-bin variance `⟨φ²⟩ − ⟨φ⟩²` follows.
 
 ## Requirements
 
@@ -70,7 +74,7 @@ wmake libso
 cd tutorials/oscillatingLidCavity
 ./Allrun
 paraview case.foam &
-# Time directories 0.0, 0.1, ..., 2.9 contain U_PA, p_PA, U_PATKE, etc.
+# Time directories 0.0, 0.1, ..., 2.9 contain U_PA, p_PA, U_PA_UU, etc.
 ```
 
 This 400-cell laminar case ends in ≈1 min and exercises the full pipeline:
@@ -119,7 +123,7 @@ dictionaries.
 - **Welford M₂** for cross-cycle variance — numerically stable; avoids catastrophic cancellation when cycle-to-cycle differences are small.
 - **Lazy field lookup**: the field list is re-checked every `execute()`, so fields registered by other function objects (e.g. `wallShearStress`) are picked up even if BBPA is constructed before them.
 - **Strategy B output**: each bin writes to its own phase-aligned time directory, so `foamListTimes` / `foamToVTK` handle the output natively without special postprocessing.
-- **Partial-cycle TKE**: `_PATKE` fires even on a single-cycle run (`binCounts_ == 0`) by falling through to the in-progress accumulators — eliminates endpoint-alignment gotchas.
+- **Partial-cycle second moment**: `_PA_UU` fires even on a single-cycle run (`binCounts_ == 0`) by falling through to the in-progress accumulators — eliminates endpoint-alignment gotchas.
 
 ## License
 
