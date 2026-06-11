@@ -1,0 +1,35 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  12                                    |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+//
+// Stenosis-pipe v4 controlled validation case.
+//
+//   D            = 5.0 mm   (inlet/outlet pipe diameter)
+//   D_throat     = 2.5 mm   (75% area reduction)
+//   L            = 200  mm  (axial length)
+//   T            = 1.0  s   (pulsatile period)
+//   U_b,peak     = 0.6  m/s (inlet bulk peak velocity)
+//   nu           = 1.0e-6 m^2/s
+//
+//   Re_peak (inlet, D=5 mm)        = U_b,peak * D    / nu = 3000
+//   Re_throat,peak (D_t=2.5 mm)    = 4*U_b,peak * D_t / nu = 6000
+//                                    (mass conservation: U_throat = U_b * 4)
+//
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      transportProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+viscosityModel  constant;
+
+nu              [0 2 -1 0 0 0 0]  1.0e-6;
+
+// ************************************************************************* //

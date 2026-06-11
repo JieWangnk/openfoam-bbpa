@@ -1,0 +1,10 @@
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+runApplication blockMesh
+runApplication decomposePar
+runParallel $(getApplication)
+runApplication reconstructPar
+# BBPA phase-bin fields land in the reconstructed phase-aligned time
+# directories (U_PA, U_PA_UU, U_PAVariance). Inspect with: paraview case.foam
