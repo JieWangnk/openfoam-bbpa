@@ -48,20 +48,14 @@ static void writePAField
     const Foam::word& binTimeName
 )
 {
-    Foam::fileName caseDir =
-        mesh.time().rootPath() / mesh.time().caseName();
-
-    Foam::fileName timeDir;
-    if (Foam::Pstream::parRun())
-    {
-        timeDir = caseDir
-            / ("processor" + Foam::name(Foam::Pstream::myProcNo()))
-            / binTimeName;
-    }
-    else
-    {
-        timeDir = caseDir / binTimeName;
-    }
+    // mesh.time().path() == rootPath()/caseName(); in a parallel run
+    // caseName() is already the processor-local case (".../processorN"),
+    // so the processorN segment must NOT be appended again. The previous
+    // code did rootPath/caseName + processorN, producing the
+    // processorN/processorN/<time> nesting -- and the write location then
+    // disagreed with restoreBinItemFromDisk()'s read path
+    // (mesh.time().path()/binTime), silently breaking parallel restart.
+    const Foam::fileName timeDir = mesh.time().path() / binTimeName;
     Foam::mkDir(timeDir);
 
     Foam::OFstream os(timeDir / paField.name());
