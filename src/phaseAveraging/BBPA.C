@@ -244,6 +244,7 @@ Foam::functionObjects::BBPA::BBPA
     previousCycle_(-1),
     currentBin_(-1),
     previousBin_(-1),
+    lastFullWriteCycle_(-1),
     scalarBinItems_(),
     vectorBinItems_()
 {
@@ -413,6 +414,20 @@ bool Foam::functionObjects::BBPA::write()
         if (isLastWrite)
         {
             writeAllAveragedFields();
+        }
+    }
+    else if (writeMode_ == "perCycle")
+    {
+        // Full phase-aligned dump, but only once per completed cycle (the
+        // first write after a cycle boundary) instead of every solver write.
+        // Cuts the bin-output I/O by ~period/writeInterval while staying a
+        // full, restart-safe checkpoint at each cycle (restart granularity =
+        // one cycle). lastFullWriteCycle_ starts at -1 and is not persisted,
+        // so the first write after any (re)start re-establishes the checkpoint.
+        if (currentCycle_ > lastFullWriteCycle_)
+        {
+            writeAllAveragedFields();
+            lastFullWriteCycle_ = currentCycle_;
         }
     }
     else

@@ -118,6 +118,11 @@ class BBPA
         //     write, no extra dirs created.
         //   "both": do both -- companion every write + a full
         //     phase-aligned dump on the final call.
+        //   "perCycle": like "phaseAlignedDirs" but the full dump is
+        //     written only once per completed cycle (the first write
+        //     after a cycle boundary), not every write -- cuts the
+        //     bin-output I/O by ~period/writeInterval while staying a
+        //     full, restart-safe checkpoint at each cycle boundary.
         word writeMode_;
 
         //- Current cycle number
@@ -131,6 +136,11 @@ class BBPA
 
         //- Previous bin number
         label previousBin_;
+
+        //- Last cycle whose full phase-aligned set was written
+        //  (writeMode "perCycle" only). -1 = none yet; resets to -1 on
+        //  (re)start, so the first write after any restart re-checkpoints.
+        label lastFullWriteCycle_;
 
         //- Bin item structure for each field (templated to preserve type)
         template<class Type>
