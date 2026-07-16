@@ -107,7 +107,8 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     const word& name,
     const fvMesh& mesh,
     const label nBins,
-    const labelList& activeBins
+    const labelList& activeBins,
+    const bool keepLastCycle
 )
 :
     fieldName_(name),
@@ -118,7 +119,9 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     currentCycleBinTime_(nBins, 0.0),
     currentCycleBinSum_(nBins),
     meanSqrFields_(nBins),
-    currentCycleBinSqrSum_(nBins)
+    currentCycleBinSqrSum_(nBins),
+    lastCycleFields_(keepLastCycle ? nBins : 0),
+    lastCycleBinTime_(keepLastCycle ? nBins : 0, 0.0)
 {
     // Look up field to get dimensions
     const FieldType& field = mesh.lookupObject<FieldType>(name);
@@ -296,6 +299,44 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
         // Skip bins not allocated in sparse-bin mode (also have time==0).
         if (!currentCycleBinSum_.set(binI)) continue;
 
+        // "bin" mode: capture THIS cycle's bin before it is folded into the
+        // running mean and the accumulators are reset. write() runs after
+        // resetAllBinsForNewCycle(), so this is the only point at which the
+        // completed cycle's bin still exists.
+        if (lastCycleFields_.size())
+        {
+            lastCycleBinTime_[binI] = currentCycleBinTime_[binI];
+            if (currentCycleBinTime_[binI] > 0)
+            {
+                if (!lastCycleFields_.set(binI))
+                {
+                    lastCycleFields_.set
+                    (
+                        binI,
+                        new FieldType
+                        (
+                            IOobject
+                            (
+                                fieldName_ + "_lastCycle_bin"
+                              + Foam::name(binI),
+                                currentCycleBinSum_[binI].mesh().time().name(),
+                                currentCycleBinSum_[binI].mesh(),
+                                IOobject::NO_READ,
+                                IOobject::NO_WRITE,
+                                false
+                            ),
+                            currentCycleBinSum_[binI]/currentCycleBinTime_[binI]
+                        )
+                    );
+                }
+                else
+                {
+                    lastCycleFields_[binI] =
+                        currentCycleBinSum_[binI]/currentCycleBinTime_[binI];
+                }
+            }
+        }
+
         if (currentCycleBinTime_[binI] > 0)
         {
             const FieldType cycleMean =
@@ -361,7 +402,10 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
     const label currentCycle,
     const label currentBin,
     const scalar cycleStartTime,
-    const scalar binDeltaT
+    const scalar binDeltaT,
+    const word& paSuffix,
+    const bool emitBin,
+    const bool emitPA
 ) const
 {
     // Find a mesh handle from the first ALLOCATED bin (in sparse-bin mode
@@ -385,9 +429,48 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
 
         if (hasCrossData || hasCurrentData)
         {
-            // Phase-aligned time for this bin
+            // Phase-aligned time for this bin. When binDeltaT equals the
+            // solver's writeInterval this IS one of the solver's own write
+            // directories, so the bin lands next to the instantaneous field
+            // rather than creating a directory of its own.
             const scalar binTime = cycleStartTime + binI * binDeltaT;
             const word binTimeName = Time::timeName(binTime);
+
+            // <field>_Bin -- THIS cycle's bin value, a distinct quantity from
+            // the cross-cycle mean below. Writing the two separately is what
+            // removes any reason to blend the in-progress cycle into the mean.
+            // It is also what makes the output restart-safe at write
+            // granularity: every write directory carries a complete bin.
+            if
+            (
+                emitBin
+             && lastCycleFields_.size()
+             && lastCycleFields_.set(binI)
+             && lastCycleBinTime_[binI] > 0
+            )
+            {
+                FieldType binField
+                (
+                    IOobject
+                    (
+                        fieldName_ + "_Bin",
+                        binTimeName,
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
+                    lastCycleFields_[binI]
+                );
+
+                writePAField(binField, mesh, binTimeName);
+            }
+
+            if (!emitPA)
+            {
+                binsWritten++;
+                continue;
+            }
 
             // Build the PA field values without triggering tmp<> expressions
             // on registered fields. We compute in a copy.
@@ -395,7 +478,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             (
                 IOobject
                 (
-                    fieldName_ + "_PA",
+                    fieldName_ + paSuffix,
                     binTimeName,
                     mesh,
                     IOobject::NO_READ,
@@ -449,7 +532,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                 (
                     IOobject
                     (
-                        fieldName_ + "_PAVariance",
+                        fieldName_ + paSuffix + "Variance",
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,
@@ -493,7 +576,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                 (
                     IOobject
                     (
-                        fieldName_ + "_PA_UU",
+                        fieldName_ + paSuffix + "_UU",
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,
@@ -618,7 +701,8 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
 (
     binItem<Type>& bi,
     const word& fieldName,
-    const scalar cycleStartTime
+    const scalar cycleStartTime,
+    const word& paSuffix
 )
 {
     typedef typename binItem<Type>::FieldType FieldType;
@@ -650,7 +734,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
         {
             IOobject paIO
             (
-                fieldName + "_PA",
+                fieldName + paSuffix,
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -672,7 +756,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
                 // noisier, but it is UNBIASED.
                 WarningInFunction
                     << "Checkpoint mean field missing: " << binTimeName
-                    << "/" << fieldName << "_PA -- bin " << binI
+                    << "/" << fieldName << paSuffix << " -- bin " << binI
                     << " reset to a clean cold start (count " << nCyc
                     << " -> 0) to avoid a low-biased average." << endl;
                 bi.binCounts_[binI] = 0;
@@ -703,7 +787,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
         {
             IOobject varIO
             (
-                fieldName + "_PAVariance",
+                fieldName + paSuffix + "Variance",
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -724,7 +808,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
         {
             IOobject uuIO
             (
-                fieldName + "_PA_UU",
+                fieldName + paSuffix + "_UU",
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -765,14 +849,16 @@ Foam::functionObjects::BBPA::restoreBinItemFromDisk<Foam::scalar>
 (
     binItem<Foam::scalar>&,
     const word&,
-    const scalar
+    const scalar,
+    const word&
 );
 template void
 Foam::functionObjects::BBPA::restoreBinItemFromDisk<Foam::vector>
 (
     binItem<Foam::vector>&,
     const word&,
-    const scalar
+    const scalar,
+    const word&
 );
 
 

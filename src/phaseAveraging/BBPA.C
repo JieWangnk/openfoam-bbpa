@@ -44,18 +44,49 @@ namespace functionObjects
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
+// Snap a value that is within a whisker of a whole number onto it, then
+// truncate. Needed because the natural expression label(x) is exact only when
+// x is not sitting on an integer boundary -- and in production it almost always
+// IS: a case with period 0.5 and I=50 has a bin width of 0.01, equal to its
+// writeInterval, so EVERY bin edge lands on a solver time.
+//
+// The failure is not hypothetical. fmod(2.9, 1.0) returns 0.8999999999999999,
+// not 0.9, so 0.8999999999999999/0.05 = 17.999999999999996 truncates to bin 17
+// when the step belongs in bin 18. The error grows with t (the mantissa has
+// fewer bits left for the fraction), which is why a run drifts from 51 steps
+// per bin in the first cycle to 49 by the third instead of a constant 50.
+//
+// Whether a given step lands right therefore depended on the last bit of
+// OpenFOAM's accumulated clock. At I=200 a bin can be only ~25 timesteps wide,
+// so one misplaced step is ~4% of the bin.
+//
+// The tolerance is in BIN UNITS and is ~7 orders of magnitude smaller than the
+// timestep-to-bin ratio of any sane configuration, so it can only ever absorb
+// floating-point noise, never a step that genuinely belongs to the lower bin.
+static inline Foam::label bbpaSnapFloor(const Foam::scalar x)
+{
+    const Foam::scalar r = std::floor(x);
+    return Foam::label((x - r) > (1.0 - 1e-9) ? r + 1.0 : r);
+}
+
+
 Foam::label Foam::functionObjects::BBPA::phaseBin() const
 {
     const scalar t = time_.value() - startTime_;
-    const scalar phase = std::fmod(t, period_);
-    return min(label(phase/binDeltaT_), nBins_ - 1);
+    scalar phase = std::fmod(t, period_);
+
+    // fmod can return period-1ulp instead of 0 for an on-grid time, which
+    // would put the first step of a cycle in the LAST bin of that cycle.
+    if (phase > period_*(1.0 - 1e-12)) phase = 0;
+
+    return min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
 }
 
 
 Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 {
     const scalar t = time_.value() - startTime_;
-    return label(t/period_);
+    return bbpaSnapFloor(t/period_);
 }
 
 
@@ -91,7 +122,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<scalar>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_
+                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
                     )
                 )
             );
@@ -106,7 +137,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<vector>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_
+                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
                     )
                 )
             );
@@ -173,7 +204,7 @@ void Foam::functionObjects::BBPA::accumulateAllFields
 }
 
 
-void Foam::functionObjects::BBPA::writeAllAveragedFields()
+void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
 {
     // Phase-aligned time directories for the cycle the accumulator actually
     // DESCRIBES, which is the one that just finished (finalizeAllForCycle()
@@ -202,7 +233,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields()
         iter()->write
         (
             time_, nBins_, currentCycle_, currentBin_,
-            cycleStart, binDeltaT_
+            cycleStart, binDeltaT_,
+            binNaming_ ? word("_BinPA") : word("_PA"),
+            binNaming_, emitPA
         );
     }
 
@@ -216,7 +249,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields()
         iter()->write
         (
             time_, nBins_, currentCycle_, currentBin_,
-            cycleStart, binDeltaT_
+            cycleStart, binDeltaT_,
+            binNaming_ ? word("_BinPA") : word("_PA"),
+            binNaming_, emitPA
         );
     }
 }
@@ -265,6 +300,8 @@ Foam::functionObjects::BBPA::BBPA
     currentBin_(-1),
     previousBin_(-1),
     lastFullWriteCycle_(-1),
+    binNaming_(false),
+    paWriteInterval_(1),
     checkpointSearched_(false),
     checkpointPath_(fileName::null),
     countersRestored_(false),
@@ -322,11 +359,49 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     }
 
     // Output mode: "phaseAlignedDirs" (default, Strategy B),
-    // "companion" (one bin into solver's time dir), or "both".
+    // "companion" (one bin into solver's time dir), "both", "perCycle",
+    // or "bin".
     writeMode_ = dict.lookupOrDefault<word>
     (
         "writeMode", word("phaseAlignedDirs")
     );
+
+    // "bin" mode: <field>_Bin / _BinPA / _BinPA_UU / _BinPAVariance naming,
+    // plus the extra per-cycle _Bin file. Everything else behaves as
+    // "perCycle" (one full dump per completed cycle).
+    binNaming_ = (writeMode_ == "bin");
+
+    // How often the cross-cycle _BinPA* files are written, in completed
+    // cycles. The per-cycle _Bin file is always written.
+    paWriteInterval_ = dict.lookupOrDefault<label>("PAwriteInterval", 1);
+
+    if (binNaming_)
+    {
+        // Warn when the bins will NOT land on the solver's write times, since
+        // the whole point of this mode is that <time>/U and <time>/U_Bin sit
+        // side by side. This is a configuration smell, not an error: the mode
+        // still works, it just creates directories of its own.
+        //
+        // NB: binDeltaT_ is not assigned until below, so use period_/nBins_.
+        // Time has no public writeInterval() accessor, so read controlDict.
+        const scalar binWidth = period_/nBins_;
+        const scalar wi =
+            time_.controlDict().lookupOrDefault<scalar>("writeInterval", -1);
+        if (wi > 0)
+        {
+            const scalar ratio = wi/binWidth;
+            if (mag(ratio - std::round(ratio)) > 1e-6)
+            {
+                WarningInFunction
+                    << "writeMode 'bin': the solver writeInterval (" << wi
+                    << ") is not an integer multiple of the bin width "
+                    << "period/nBins (" << binWidth << ")." << nl
+                    << "    The _Bin files will land in directories of their "
+                    << "own rather than beside the instantaneous fields."
+                    << endl;
+            }
+        }
+    }
 
     // Phase origin: explicit override or auto-align to nearest
     // cycle boundary at or before the current time.
@@ -446,10 +521,10 @@ bool Foam::functionObjects::BBPA::write()
         writeCompanionAllFields();
         if (isLastWrite)
         {
-            writeAllAveragedFields();
+            writeAllAveragedFields(true);
         }
     }
-    else if (writeMode_ == "perCycle")
+    else if (writeMode_ == "bin" || writeMode_ == "perCycle")
     {
         // Full phase-aligned dump, but only once per completed cycle (the
         // first write after a cycle boundary) instead of every solver write.
@@ -459,14 +534,26 @@ bool Foam::functionObjects::BBPA::write()
         // so the first write after any (re)start re-establishes the checkpoint.
         if (currentCycle_ > lastFullWriteCycle_)
         {
-            writeAllAveragedFields();
+            // "bin" mode: the per-cycle _Bin file is written every cycle,
+            // but the cross-cycle _BinPA* only every PAwriteInterval cycles
+            // (or, when PAwriteInterval <= 0, on the final write only).
+            // The completed-cycle count is currentCycle_ (cycle currentCycle_-1
+            // has just been folded in).
+            const bool emitPA =
+                !binNaming_
+             || (paWriteInterval_ <= 0
+                    ? isLastWrite
+                    : (currentCycle_ % paWriteInterval_) == 0)
+             || isLastWrite;
+
+            writeAllAveragedFields(emitPA);
             lastFullWriteCycle_ = currentCycle_;
         }
     }
     else
     {
         // default: "phaseAlignedDirs" (Strategy B, back-compat)
-        writeAllAveragedFields();
+        writeAllAveragedFields(true);
     }
 
     // Checkpoint: save scalar counters so the run can be restarted.
@@ -682,7 +769,11 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             const dictionary& fd = propsDict.subDict(fname);
             iter()->nCycles_ = fd.lookup<label>("nCycles");
             iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
-            restoreBinItemFromDisk(*(iter()), fname, cycleStart);
+            restoreBinItemFromDisk
+            (
+                *(iter()), fname, cycleStart,
+                binNaming_ ? word("_BinPA") : word("_PA")
+            );
 
             Info<< "    Restored field " << fname
                 << ": nCycles=" << iter()->nCycles_ << endl;
@@ -707,7 +798,11 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             const dictionary& fd = propsDict.subDict(fname);
             iter()->nCycles_ = fd.lookup<label>("nCycles");
             iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
-            restoreBinItemFromDisk(*(iter()), fname, cycleStart);
+            restoreBinItemFromDisk
+            (
+                *(iter()), fname, cycleStart,
+                binNaming_ ? word("_BinPA") : word("_PA")
+            );
 
             Info<< "    Restored field " << fname
                 << ": nCycles=" << iter()->nCycles_ << endl;

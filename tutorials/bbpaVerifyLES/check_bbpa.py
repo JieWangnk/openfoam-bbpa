@@ -35,6 +35,7 @@ Usage:
   python3 check_bbpa.py --field wallShearStress --patches walls ...
 """
 import argparse
+import math
 import os
 import re
 import sys
@@ -125,6 +126,38 @@ def read_all(path, patches):
         if a is not None:
             out[p] = a
     return out
+
+
+def phase_bin(t, start_time, period, dT, nbins):
+    """Bin index for time t -- the same snap-then-truncate the FO uses.
+
+    A plain int(fmod(t-t0, period)/dT) is exact only when the result is not
+    sitting on an integer boundary, and in an ON-GRID case it always is:
+    fmod(2.9, 1.0) returns 0.8999999999999999, so 0.8999.../0.05 =
+    17.999999999999996 truncates to 17 when the step belongs in bin 18. The
+    error grows with t, which is why the naive version gives 51 steps in the
+    first cycle's bin and 49 in the third instead of a constant 50.
+
+    This is NOT a fudge to make the test pass: it is the same arithmetic the FO
+    performs, applied independently to a time this script derived on its own.
+    The check remains an identity check -- if the FO folded a step into a
+    different bin than this does, the bin means still disagree by ~1e-2 and the
+    test still fails loudly.
+    """
+    phase = math.fmod(t - start_time, period)
+    if phase > period*(1.0 - 1e-12):
+        phase = 0.0
+    x = phase/dT
+    r = math.floor(x)
+    j = int(r + 1.0 if (x - r) > (1.0 - 1e-9) else r)
+    return min(j, nbins - 1)
+
+
+def cycle_number(t, start_time, period):
+    """Cycle index for t, snapped the same way as phase_bin."""
+    x = (t - start_time)/period
+    r = math.floor(x)
+    return int(r + 1.0 if (x - r) > (1.0 - 1e-9) else r)
 
 
 def sqr_sym(U):
@@ -223,9 +256,8 @@ def main():
         dt = (times[k] - times[k-1]) if k > 0 else (times[1] - times[0])
         if t < start_time - 1e-12:
             continue
-        ph = (t - start_time) % a.period
-        j = min(int(ph / dT), a.nbins - 1)
-        n = int((t - start_time) // a.period)
+        j = phase_bin(t, start_time, a.period, dT, a.nbins)
+        n = cycle_number(t, start_time, a.period)
         F = read_all(os.path.join(case, traj[k][1], fld), a.patches)
         key = (n, j)
         if key not in wts:

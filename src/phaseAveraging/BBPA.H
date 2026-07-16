@@ -126,7 +126,40 @@ class BBPA
         //     after a cycle boundary), not every write -- cuts the
         //     bin-output I/O by ~period/writeInterval while staying a
         //     full, restart-safe checkpoint at each cycle boundary.
+        //   "bin": like "perCycle", but names the outputs <field>_Bin*
+        //     and additionally emits <field>_Bin -- THIS cycle's bin
+        //     value -- alongside the cross-cycle <field>_BinPA. See
+        //     binNaming_ below for why the extra file matters.
         word writeMode_;
+
+        //- "bin" mode: use the <field>_Bin / _BinPA / _BinPA_UU /
+        //  _BinPAVariance naming instead of <field>_PA / _PA_UU /
+        //  _PAVariance, and emit the extra _Bin file.
+        //
+        //  The point of _Bin is not cosmetic. The old output tried to serve
+        //  two masters with one file: <field>_PA was the mean over complete
+        //  cycles, but a reader also wanted to know what THIS cycle did, so
+        //  the companion path blended the in-progress cycle into it --
+        //  weighting a partial bin (often a single timestep) as a whole
+        //  cycle, and corrupting the very file the restart reads its mean
+        //  back out of. Emitting the two separately -- _Bin for this cycle,
+        //  _BinPA for the average across cycles -- removes the reason to
+        //  blend at all.
+        //
+        //  When binDeltaT_ equals the solver's writeInterval (the usual
+        //  production case: period 0.5 with I=50 gives 0.01), the
+        //  phase-aligned bin directories ARE the solver's own write
+        //  directories, so <time>/U, <time>/U_Bin and <time>/U_BinPA land
+        //  side by side and no extra directories are created.
+        bool binNaming_;
+
+        //- "bin" mode: write the cross-cycle _BinPA* files only every Nth
+        //  completed cycle. The per-cycle _Bin file is always written (it is
+        //  what makes the output restart-safe at write granularity).
+        //   1  = every cycle (default)
+        //   N  = every N cycles
+        //  <=0 = only on the final write
+        label paWriteInterval_;
 
         //- Current cycle number
         label currentCycle_;
@@ -211,17 +244,37 @@ class BBPA
             //- Current cycle: time-weighted sum of (phi*phi) for each bin
             PtrList<SqrFieldType> currentCycleBinSqrSum_;
 
+            //- "bin" mode only (empty otherwise): the bin mean of the cycle
+            //  that JUST completed, captured by finalizeCycle() before the
+            //  accumulators are reset.
+            //
+            //  It has to be captured rather than read from
+            //  currentCycleBinSum_ at write time, because execute() runs
+            //  finalizeAllForCycle() and then resetAllBinsForNewCycle() on the
+            //  cycle transition, and only afterwards does the framework call
+            //  write(). By then currentCycleBinTime_ is zero and the completed
+            //  cycle's bin is gone -- folded into meanFields_ and unrecoverable
+            //  from it.
+            PtrList<FieldType> lastCycleFields_;
+
+            //- Bin time accumulated by the cycle captured in lastCycleFields_.
+            //  Zero means that bin received no data in that cycle.
+            scalarField lastCycleBinTime_;
+
             //- Construct. activeBins lists the bin indices that should
             //  allocate field-sized accumulators; an EMPTY list means
             //  "all nBins bins" (original behaviour). Non-active bins
             //  are left as null entries in the PtrLists and are skipped
             //  by accumulate()/finalizeCycle()/write().
+            //  keepLastCycle allocates lastCycleFields_ ("bin" mode). It is
+            //  opt-in because it costs one extra field per active bin.
             binItem
             (
                 const word& name,
                 const fvMesh& mesh,
                 const label nBins,
-                const labelList& activeBins
+                const labelList& activeBins,
+                const bool keepLastCycle = false
             );
 
             void resetCurrentCycle();
@@ -232,6 +285,14 @@ class BBPA
                 const scalar dt
             );
             void finalizeCycle();
+
+            //- Write the phase-aligned bin outputs.
+            //  paSuffix selects the naming: "_PA" (default/back-compat) or
+            //  "_BinPA" ("bin" mode). emitBin additionally writes
+            //  <field>_Bin, the CURRENT cycle's bin value, which is a
+            //  different quantity from the cross-cycle mean and must never
+            //  be blended into it. emitPA gates the cross-cycle files so
+            //  they can be written less often than the per-cycle _Bin.
             void write
             (
                 const Time& time,
@@ -239,7 +300,10 @@ class BBPA
                 const label currentCycle,
                 const label currentBin,
                 const scalar cycleStartTime,
-                const scalar binDeltaT
+                const scalar binDeltaT,
+                const word& paSuffix,
+                const bool emitBin,
+                const bool emitPA
             ) const;
 
             //- Companion write: dump only the current-phase bin's PA
@@ -285,8 +349,10 @@ class BBPA
         //- Accumulate all fields for current time step
         void accumulateAllFields(const label binI, const scalar dt);
 
-        //- Write all phase-averaged fields (Strategy B: I dirs)
-        void writeAllAveragedFields();
+        //- Write all phase-averaged fields (Strategy B: I dirs).
+        //  emitPA=false ("bin" mode with PAwriteInterval>1) writes only the
+        //  per-cycle <field>_Bin and skips the cross-cycle _BinPA* files.
+        void writeAllAveragedFields(const bool emitPA);
 
         //- Restore checkpoint state on restart from disk.
         //  Reads <name>Properties (counters: startTime, currentCycle,
@@ -298,12 +364,15 @@ class BBPA
         void readCheckpoint();
 
         //- Templated helper: restore one binItem from disk.
+        //  paSuffix must match what write() emitted, or the restore silently
+        //  finds nothing and every bin cold-starts.
         template<class Type>
         void restoreBinItemFromDisk
         (
             binItem<Type>& bi,
             const word& fieldName,
-            const scalar cycleStartTime
+            const scalar cycleStartTime,
+            const word& paSuffix
         );
 
         //- Companion write: one bin (current phase) into solver's
