@@ -356,18 +356,29 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                 meanFields_[binI]
             );
 
-            if (hasCrossData && hasCurrentData)
-            {
-                const scalar inv = 1.0 / currentCycleBinTime_[binI];
-                const scalar nOld = binCounts_[binI];
-                const scalar total = nOld + 1.0;
-                paField.primitiveFieldRef() =
-                    (
-                        meanFields_[binI].primitiveField() * nOld
-                      + currentCycleBinSum_[binI].primitiveField() * inv
-                    ) / total;
-            }
-            else if (!hasCrossData)
+            // paField was constructed FROM meanFields_[binI], i.e. the mean over
+            // the binCounts_[binI] COMPLETE cycles folded so far. That is what
+            // <name>_PA must contain.
+            //
+            // It must NOT be blended with the in-progress cycle. The old code did
+            //     (meanFields_*nOld + currentCycleBinSum_/currentCycleBinTime_)
+            //         / (nOld + 1)
+            // which is wrong twice over:
+            //  (1) the in-progress bin is PARTIAL -- with writeMode perCycle the
+            //      write fires on the cycle transition, when the new cycle has
+            //      accumulated exactly ONE timestep into bin 0 -- yet it is
+            //      weighted as a whole cycle. Measured on tutorials/bbpaVerify:
+            //      bin 0 came out 0.632 against a true 0.701, i.e. (mean*2 + U_inst)/3,
+            //      while every other bin (just reset, so no current data) was exact.
+            //  (2) these files ARE the restart checkpoint: restoreBinItemFromDisk()
+            //      reads meanFields_ back out of <name>_PA. A blended value is
+            //      therefore restored AS the folded mean and compounds at every
+            //      restart.
+            //
+            // Only when no complete cycle exists yet is there nothing to report but
+            // the running partial. binCounts_[binI] is 0 in that case, and the
+            // restore skips bins with count 0, so it can never be read back as a mean.
+            if (!hasCrossData && hasCurrentData)
             {
                 const scalar inv = 1.0 / currentCycleBinTime_[binI];
                 paField.primitiveFieldRef() =
