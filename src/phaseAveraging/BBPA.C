@@ -175,10 +175,22 @@ void Foam::functionObjects::BBPA::accumulateAllFields
 
 void Foam::functionObjects::BBPA::writeAllAveragedFields()
 {
-    // Compute the start time of the current (or most recent) cycle
-    // so bins are written to phase-aligned time directories.
+    // Phase-aligned time directories for the cycle the accumulator actually
+    // DESCRIBES, which is the one that just finished (finalizeAllForCycle()
+    // folds cycle currentCycle_-1 in at the transition, and the perCycle dump
+    // fires on the first write after that boundary).
+    //
+    // This must be the PREVIOUS cycle's window, not the current one.  Writing
+    // to the current cycle's window put the bin dirs AHEAD of the solver clock,
+    // where they were indistinguishable from a half-written aborted run: the
+    // restart cleanup deleted them (it must, or `latestTime` lands on a
+    // bin-only dir with no p and the case will not start), and the restore then
+    // found the mean missing while the counters had already been restored --
+    // silently averaging real cycles against a phantom zero.  Stamping the
+    // window the data belongs to keeps every bin dir at or behind the solver
+    // clock, so the cleanup never touches it and no cleanup change is needed.
     const scalar cycleStart =
-        startTime_ + currentCycle_ * period_;
+        startTime_ + max(currentCycle_ - 1, 0) * period_;
 
     forAllConstIter
     (
@@ -258,6 +270,7 @@ Foam::functionObjects::BBPA::BBPA
     countersRestored_(false),
     checkpointCycleStart_(0),
     restoredFields_(),
+    legacyStart_probed_(false),
     scalarBinItems_(),
     vectorBinItems_()
 {
@@ -596,8 +609,40 @@ void Foam::functionObjects::BBPA::readCheckpoint()
 
         // Capture the checkpoint's cycle start so a late-registering field
         // is restored from the phase-aligned dirs the checkpoint actually
-        // wrote, not from an already-advanced cycle.
-        checkpointCycleStart_ = startTime_ + currentCycle_ * period_;
+        // wrote, not from an already-advanced cycle.  Must mirror
+        // writeAllAveragedFields(): the bins live in the window of the cycle
+        // they describe (currentCycle_-1), which is at/behind the solver clock.
+        checkpointCycleStart_ = startTime_ + max(currentCycle_ - 1, 0) * period_;
+
+        // Backward compatibility: checkpoints written before this fix stamped
+        // the bins one cycle LATER (currentCycle_*period_). If the current
+        // convention finds nothing on disk but the legacy window does, fall
+        // back to it so an in-flight run restarts against its own history
+        // instead of silently cold-starting.
+        {
+            const scalar legacyStart = startTime_ + currentCycle_ * period_;
+            const word probe = fieldNames_.size() ? fieldNames_[0] : word::null;
+            if (probe != word::null && !legacyStart_probed_)
+            {
+                legacyStart_probed_ = true;
+                const fileName base = obr_.time().path();
+                const bool newOk = Foam::isFile
+                (
+                    base/Time::timeName(checkpointCycleStart_)/(probe + "_PA")
+                );
+                const bool oldOk = Foam::isFile
+                (
+                    base/Time::timeName(legacyStart)/(probe + "_PA")
+                );
+                if (!newOk && oldOk)
+                {
+                    Info<< "    legacy checkpoint layout detected: reading bins "
+                        << "from the pre-fix window (cycleStart=" << legacyStart
+                        << ")" << endl;
+                    checkpointCycleStart_ = legacyStart;
+                }
+            }
+        }
         countersRestored_ = true;
     }
 

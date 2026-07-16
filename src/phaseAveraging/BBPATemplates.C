@@ -584,10 +584,27 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
                 mesh.time().path() / binTimeName / paIO.name();
             if (!Foam::isFile(paPath))
             {
+                // The mean for this bin is gone but its cycle count survived in
+                // the Properties dict.  Keeping the count would make Welford
+                // average the remaining cycles against a phantom zero -- with
+                // count n0 and k further cycles the bin converges to
+                // k*x/(n0+k), i.e. biased LOW by n0/(n0+k) and indistinguishable
+                // from a healthy value (non-zero, full-size file).  Reset the
+                // bin's history instead: it loses the lost cycles and is
+                // noisier, but it is UNBIASED.
                 WarningInFunction
                     << "Checkpoint mean field missing: " << binTimeName
                     << "/" << fieldName << "_PA -- bin " << binI
-                    << " left at cold-start zero." << endl;
+                    << " reset to a clean cold start (count " << nCyc
+                    << " -> 0) to avoid a low-biased average." << endl;
+                bi.binCounts_[binI] = 0;
+                bi.meanFields_[binI] =
+                    dimensioned<Type>(bi.meanFields_[binI].dimensions(), Zero);
+                bi.M2Fields_[binI] =
+                    dimensionedScalar(bi.M2Fields_[binI].dimensions(), 0);
+                bi.meanSqrFields_[binI] =
+                    dimensioned<typename binItem<Type>::SqrType>
+                    (bi.meanSqrFields_[binI].dimensions(), Zero);
                 continue;
             }
 

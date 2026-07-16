@@ -173,6 +173,9 @@ class BBPA
             //- Fields whose checkpoint state has been restored.
             HashSet<word> restoredFields_;
 
+            //- Has the legacy (pre-fix) bin-window layout been probed for?
+            bool legacyStart_probed_;
+
         //- Bin item structure for each field (templated to preserve type)
         template<class Type>
         struct binItem
