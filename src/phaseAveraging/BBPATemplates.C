@@ -427,11 +427,15 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             // Only when no complete cycle exists yet is there nothing to report but
             // the running partial. binCounts_[binI] is 0 in that case, and the
             // restore skips bins with count 0, so it can never be read back as a mean.
+            //
+            // Assign the WHOLE field, not primitiveFieldRef(): an internal-only
+            // assignment leaves the boundary at whatever the accumulator was
+            // constructed with (zero), silently dropping the boundary values
+            // of the partial bin. See the _PA_UU note below.
             if (!hasCrossData && hasCurrentData)
             {
                 const scalar inv = 1.0 / currentCycleBinTime_[binI];
-                paField.primitiveFieldRef() =
-                    currentCycleBinSum_[binI].primitiveField() * inv;
+                paField = currentCycleBinSum_[binI] * inv;
             }
 
             writePAField(paField, mesh, binTimeName);
@@ -466,6 +470,25 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             // Fires whenever we have data (finalised or in-progress bin).
             if (hasCrossData || hasCurrentData)
             {
+                // Construct FROM meanSqrFields_[binI], exactly as paField is
+                // constructed from meanFields_[binI] above. This is not a
+                // stylistic change: the previous form built a Zero field and
+                // then assigned only primitiveFieldRef(), so the BOUNDARY of
+                // <name>_PA_UU was never written and every patch came out
+                // "value uniform (0 0 0 0 0 0)".
+                //
+                // The accumulation itself is fine -- operator+= on a
+                // GeometricField updates the boundary too -- so the correct
+                // boundary existed in memory and was simply dropped on write.
+                //
+                // For wallShearStress this made the field entirely useless
+                // rather than merely incomplete: WSS has a uniform (0 0 0)
+                // internalField, so ALL of its data is on the wall patch.
+                // wallShearStress_PA_UU was therefore zero everywhere, and any
+                // WSS fluctuation intensity or Reynolds stress derived from it
+                // would be silently zero rather than obviously broken.
+                // Verified by tutorials/bbpaVerifyLES, which compares boundary
+                // patches and not just the internalField.
                 SqrFieldType paUU
                 (
                     IOobject
@@ -477,33 +500,28 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                         IOobject::NO_WRITE,
                         false
                     ),
-                    mesh,
-                    dimensioned<SqrType>(meanSqrFields_[binI].dimensions(), Zero)
+                    meanSqrFields_[binI]
                 );
 
-                if (hasCrossData)
+                // The raw second moment over the COMPLETE cycles only -- as for
+                // _PA above, and for the same two reasons: blending the
+                // in-progress cycle weights a partial bin (one timestep, on a
+                // perCycle write) as a whole cycle, and this file is the
+                // checkpoint that restoreBinItemFromDisk() reads meanSqrFields_
+                // back out of, so a blended value would be restored AS the
+                // second moment and compound every restart.
+                //
+                // This matters more than _PA: R_ij^bin = <U_iU_j> - <U_i><U_j>
+                // and k_bin = 0.5*tr(R_ij^bin) are reconstructed FROM this
+                // field, so a contaminated bin propagates straight into the
+                // reported Reynolds stress and resolved energy.
+                //
+                // Only when no complete cycle exists yet is there nothing to
+                // report but the running partial.
+                if (!hasCrossData && hasCurrentData)
                 {
-                    // The raw second moment over the COMPLETE cycles only --
-                    // exactly as for _PA above, and for the same two reasons:
-                    // blending the in-progress cycle weights a partial bin (one
-                    // timestep, on a perCycle write) as a whole cycle, and this
-                    // file is the checkpoint that restoreBinItemFromDisk() reads
-                    // meanSqrFields_ back out of, so a blended value would be
-                    // restored AS the second moment and compound every restart.
-                    //
-                    // This matters more than _PA: R_ij^bin = <U_iU_j> - <U_i><U_j>
-                    // and k_bin = 0.5*tr(R_ij^bin) are reconstructed FROM this
-                    // field, so a contaminated bin propagates straight into the
-                    // reported Reynolds stress and resolved energy.
-                    paUU.primitiveFieldRef() =
-                        meanSqrFields_[binI].primitiveField();
-                }
-                else
-                {
-                    // Partial-cycle only: single-realisation second moment.
                     const scalar invT = 1.0 / currentCycleBinTime_[binI];
-                    paUU.primitiveFieldRef() =
-                        currentCycleBinSqrSum_[binI].primitiveField() * invT;
+                    paUU = currentCycleBinSqrSum_[binI] * invT;
                 }
 
                 writePAField(paUU, mesh, binTimeName);
@@ -668,9 +686,16 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
                 continue;
             }
 
+            // Whole-field assignment, not primitiveFieldRef(): restoring only
+            // the internal field leaves the accumulator's BOUNDARY at its
+            // constructed zero, so every restart silently discarded the
+            // boundary phase-average and then folded new cycles against a
+            // phantom zero history. For wallShearStress -- whose data is
+            // entirely on the wall patch -- that meant the restart threw away
+            // the whole accumulated field while the Properties counters still
+            // claimed the cycles were there.
             FieldType loaded(paIO, mesh);
-            bi.meanFields_[binI].primitiveFieldRef() =
-                loaded.primitiveField();
+            bi.meanFields_[binI] = loaded;
         }
 
         // 2. M2: read fieldName_PAVariance and rescale by (n-1).
@@ -691,8 +716,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
             if (Foam::isFile(varPath))
             {
                 volScalarField loadedVar(varIO, mesh);
-                bi.M2Fields_[binI].primitiveFieldRef() =
-                    loadedVar.primitiveField() * (nCyc - 1.0);
+                bi.M2Fields_[binI] = loadedVar * (nCyc - 1.0);
             }
         }
 
@@ -713,8 +737,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
             if (Foam::isFile(uuPath))
             {
                 SqrFieldType loadedUU(uuIO, mesh);
-                bi.meanSqrFields_[binI].primitiveFieldRef() =
-                    loadedUU.primitiveField();
+                bi.meanSqrFields_[binI] = loadedUU;
             }
         }
 

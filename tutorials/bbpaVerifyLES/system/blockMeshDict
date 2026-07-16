@@ -1,0 +1,56 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+convertToMeters 0.001;
+
+vertices
+(
+    (0 0 0)
+    (200 0 0)
+    (200 10 0)
+    (0 10 0)
+    (0 0 10)
+    (200 0 10)
+    (200 10 10)
+    (0 10 10)
+);
+
+// Coarsened from the parent pulsatilePipeLES (400 20 20)=160k to (40 6 6)=1440.
+// The verification target is the function object's arithmetic, not the LES
+// physics: cycle-to-cycle variance here is inlet-driven (the boundaryData
+// record carries a ~0.07 rms perturbation that differs every cycle), so it
+// survives coarsening even where the interior cannot sustain turbulence.
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (40 6 6) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces ((0 4 7 3));
+    }
+    outlet
+    {
+        type patch;
+        faces ((1 2 6 5));
+    }
+    walls
+    {
+        type wall;
+        faces
+        (
+            (3 7 6 2)
+            (0 1 5 4)
+            (0 3 2 1)
+            (4 5 6 7)
+        );
+    }
+);
