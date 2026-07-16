@@ -44,6 +44,8 @@ Description
 #include "fvMeshFunctionObject.H"
 #include "volFieldsFwd.H"
 #include "HashPtrTable.H"
+#include "HashSet.H"
+#include "fileName.H"
 #include "scalarField.H"
 #include "PtrList.H"
 
@@ -142,6 +144,35 @@ class BBPA
         //  (re)start, so the first write after any restart re-checkpoints.
         label lastFullWriteCycle_;
 
+        //- Lazy checkpoint restore state.
+        //   Derived fields (e.g. wallShearStress, produced by their own
+        //   function object) are NOT yet in the objectRegistry when this
+        //   FO is constructed, so they get no binItem at construction and
+        //   were therefore missed by the one-shot checkpoint restore --
+        //   they cold-started on every restart while U (a genuine solver
+        //   field) restored correctly. readCheckpoint() is now idempotent
+        //   and per-field: initializeBinItems() reports when a field
+        //   registers late, and the checkpoint is re-applied to just that
+        //   field, against the SAME checkpoint the run started from.
+
+            //- Has the checkpoint file been located yet?
+            bool checkpointSearched_;
+
+            //- Path of the Properties checkpoint restored from
+            //  (empty => genuine cold start; no checkpoint on disk).
+            fileName checkpointPath_;
+
+            //- Have the run-level counters been restored?
+            bool countersRestored_;
+
+            //- Cycle start time of the restored checkpoint. Captured once so
+            //  a late-registering field is restored against the checkpoint's
+            //  phase-aligned dirs, not against an already-advanced cycle.
+            scalar checkpointCycleStart_;
+
+            //- Fields whose checkpoint state has been restored.
+            HashSet<word> restoredFields_;
+
         //- Bin item structure for each field (templated to preserve type)
         template<class Type>
         struct binItem
@@ -235,8 +266,11 @@ class BBPA
         //- Calculate current cycle number
         label currentCycleNumber() const;
 
-        //- Initialize bin items for all fields
-        void initializeBinItems();
+        //- Initialize bin items for all fields.
+        //  Returns true if any binItem was newly created by this call, so
+        //  the caller can re-apply the checkpoint to a field that only
+        //  registered now (see readCheckpoint()).
+        bool initializeBinItems();
 
         //- Reset all bins for new cycle
         void resetAllBinsForNewCycle();

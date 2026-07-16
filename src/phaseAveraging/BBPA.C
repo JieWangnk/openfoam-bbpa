@@ -59,12 +59,16 @@ Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 }
 
 
-void Foam::functionObjects::BBPA::initializeBinItems()
+bool Foam::functionObjects::BBPA::initializeBinItems()
 {
     // Idempotent: creates binItems for fields available now that don't
     // already have one. Fields registered later (e.g. wallShearStress,
     // which is populated by its own function object) are picked up on a
-    // later call from execute().
+    // later call from execute().  Returns true if anything was created,
+    // which signals execute() to re-apply the checkpoint to the newcomer
+    // (otherwise it would silently cold-start on every restart).
+    bool created = false;
+
     forAll(fieldNames_, i)
     {
         const word& fieldName = fieldNames_[i];
@@ -91,6 +95,7 @@ void Foam::functionObjects::BBPA::initializeBinItems()
                     )
                 )
             );
+            created = true;
         }
         else if (mesh_.foundObject<volVectorField>(fieldName))
         {
@@ -105,6 +110,7 @@ void Foam::functionObjects::BBPA::initializeBinItems()
                     )
                 )
             );
+            created = true;
         }
         // Other field types (symmTensor, tensor) are not supported: the
         // second-moment accumulator phi*phi isn't defined in OpenFOAM for
@@ -112,6 +118,8 @@ void Foam::functionObjects::BBPA::initializeBinItems()
         // fields; they'll be retried on the next execute() call in case
         // a vector/scalar version appears.
     }
+
+    return created;
 }
 
 
@@ -245,6 +253,11 @@ Foam::functionObjects::BBPA::BBPA
     currentBin_(-1),
     previousBin_(-1),
     lastFullWriteCycle_(-1),
+    checkpointSearched_(false),
+    checkpointPath_(fileName::null),
+    countersRestored_(false),
+    checkpointCycleStart_(0),
+    restoredFields_(),
     scalarBinItems_(),
     vectorBinItems_()
 {
@@ -343,8 +356,15 @@ bool Foam::functionObjects::BBPA::execute()
 {
     // Retry initialisation for fields that weren't registered at
     // construction time (e.g. wallShearStress, populated by its own
-    // function object that runs before BBPA).
-    initializeBinItems();
+    // function object that runs before BBPA).  If one appears now, apply
+    // the checkpoint to it immediately -- otherwise it would cold-start on
+    // every restart while U (a solver field, present at construction)
+    // restored correctly.  Done BEFORE currentCycle_ is advanced below, so
+    // the restore sees the checkpoint's cycle state.
+    if (initializeBinItems())
+    {
+        readCheckpoint();
+    }
 
     const label binI = phaseBin();
     currentCycle_ = currentCycleNumber();
@@ -499,13 +519,18 @@ void Foam::functionObjects::BBPA::readCheckpoint()
     // file via NO_READ_IF_PRESENT semantics by checking explicitly.
     const word propsName = name() + "Properties";
 
-    // Search all time dirs in the registry, take the latest
-    // that contains "uniform/<propsName>".  Using direct
-    // filesystem checks rather than IOobject::typeHeaderOk so we
-    // never require constructing the dictionary at the wrong time
-    // instance.
-    fileName propsInstance;
+    // Locate the checkpoint ONCE and remember it.  Re-locating on a later
+    // call would find a Properties file written by THIS run, so a
+    // late-registering field would be restored against the wrong state.
+    if (!checkpointSearched_)
     {
+        checkpointSearched_ = true;
+
+        // Search all time dirs in the registry, take the latest
+        // that contains "uniform/<propsName>".  Using direct
+        // filesystem checks rather than IOobject::typeHeaderOk so we
+        // never require constructing the dictionary at the wrong time
+        // instance.
         const fileName casePath = obr_.time().path();
         const instantList times = obr_.time().times();
         forAllReverse(times, i)
@@ -514,27 +539,32 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 casePath / times[i].name() / "uniform" / propsName;
             if (Foam::isFile(candidate))
             {
-                propsInstance = times[i].name();
+                // Construct the full processor-local path directly from the
+                // already-verified casePath (== obr_.time().path(), which is
+                // processor-aware in parallel runs).  Going through
+                // IOdictionary(IOobject(..., obr_, MUST_READ)) here was
+                // resolving to the case-level path and crashing in parallel.
+                checkpointPath_ = candidate;
                 break;
             }
         }
 
-        if (propsInstance.empty())
+        if (checkpointPath_.empty())
         {
             Info<< type() << " " << name()
                 << ": no checkpoint Properties found; cold start."
                 << endl;
-            return;
         }
     }
 
-    // Construct the full processor-local path directly from the
-    // already-verified casePath (== obr_.time().path(), which is
-    // processor-aware in parallel runs).  Going through
-    // IOdictionary(IOobject(..., obr_, MUST_READ)) here was
-    // resolving to the case-level path and crashing in parallel.
-    const fileName propsFullPath =
-        obr_.time().path() / propsInstance / "uniform" / propsName;
+    // Genuine cold start (no checkpoint on disk): nothing to restore, and
+    // every later call is a cheap no-op.
+    if (checkpointPath_.empty())
+    {
+        return;
+    }
+
+    const fileName& propsFullPath = checkpointPath_;
 
     Info<< type() << " " << name()
         << ": restoring checkpoint state from "
@@ -555,41 +585,20 @@ void Foam::functionObjects::BBPA::readCheckpoint()
     // Scalar counters.  Phase origin always taken from the checkpoint:
     // a manual dict override after a restart would desynchronise the
     // accumulator state (which was indexed against the saved
-    // startTime_) and is therefore not honoured here.
-    startTime_ = propsDict.lookup<scalar>("startTime");
-    currentCycle_ = propsDict.lookup<label>("currentCycle");
-    previousCycle_ = propsDict.lookup<label>("previousCycle");
+    // startTime_) and is therefore not honoured here.  Restored ONCE:
+    // on a later call (a field registering mid-run) currentCycle_ has
+    // already advanced and must not be rewound to the checkpoint value.
+    if (!countersRestored_)
+    {
+        startTime_ = propsDict.lookup<scalar>("startTime");
+        currentCycle_ = propsDict.lookup<label>("currentCycle");
+        previousCycle_ = propsDict.lookup<label>("previousCycle");
 
-    // Per-field counters.
-    forAllIter
-    (
-        HashTable<autoPtr<binItem<scalar>>>,
-        scalarBinItems_,
-        iter
-    )
-    {
-        const word& fname = iter.key();
-        if (propsDict.found(fname))
-        {
-            const dictionary& fd = propsDict.subDict(fname);
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
-        }
-    }
-    forAllIter
-    (
-        HashTable<autoPtr<binItem<vector>>>,
-        vectorBinItems_,
-        iter
-    )
-    {
-        const word& fname = iter.key();
-        if (propsDict.found(fname))
-        {
-            const dictionary& fd = propsDict.subDict(fname);
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
-        }
+        // Capture the checkpoint's cycle start so a late-registering field
+        // is restored from the phase-aligned dirs the checkpoint actually
+        // wrote, not from an already-advanced cycle.
+        checkpointCycleStart_ = startTime_ + currentCycle_ * period_;
+        countersRestored_ = true;
     }
 
     // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
@@ -604,10 +613,15 @@ void Foam::functionObjects::BBPA::readCheckpoint()
     //     <name>_PA_UU[binI]      at the same t
     //                              = meanSqrFields_[binI]
     //
-    // Restore by reading from the appropriate phase-aligned dirs.
-    const scalar cycleStart =
-        startTime_ + currentCycle_ * period_;
+    // Restore by reading from the appropriate phase-aligned dirs.  Uses the
+    // checkpoint's own cycle start (captured above), so this is correct both
+    // at construction and for a field that registers later.
+    const scalar cycleStart = checkpointCycleStart_;
 
+    // Per-field restore: counters + bin fields, skipping any field already
+    // restored.  This is what lets a derived field (wallShearStress) that
+    // only appears once its own function object has run pick up the very
+    // same checkpoint U was restored from, instead of cold-starting.
     forAllIter
     (
         HashTable<autoPtr<binItem<scalar>>>,
@@ -615,7 +629,23 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         iter
     )
     {
-        restoreBinItemFromDisk(*(iter()), iter.key(), cycleStart);
+        const word& fname = iter.key();
+        if (restoredFields_.found(fname)) continue;
+
+        if (propsDict.found(fname))
+        {
+            const dictionary& fd = propsDict.subDict(fname);
+            iter()->nCycles_ = fd.lookup<label>("nCycles");
+            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+            restoreBinItemFromDisk(*(iter()), fname, cycleStart);
+
+            Info<< "    Restored field " << fname
+                << ": nCycles=" << iter()->nCycles_ << endl;
+        }
+        // Field absent from the checkpoint (not tracked in the previous
+        // run): a cold start is correct for it. Mark it done so we do not
+        // retry the lookup on every step.
+        restoredFields_.insert(fname);
     }
     forAllIter
     (
@@ -624,7 +654,20 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         iter
     )
     {
-        restoreBinItemFromDisk(*(iter()), iter.key(), cycleStart);
+        const word& fname = iter.key();
+        if (restoredFields_.found(fname)) continue;
+
+        if (propsDict.found(fname))
+        {
+            const dictionary& fd = propsDict.subDict(fname);
+            iter()->nCycles_ = fd.lookup<label>("nCycles");
+            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+            restoreBinItemFromDisk(*(iter()), fname, cycleStart);
+
+            Info<< "    Restored field " << fname
+                << ": nCycles=" << iter()->nCycles_ << endl;
+        }
+        restoredFields_.insert(fname);
     }
 
     Info<< "    Restored: startTime=" << startTime_
