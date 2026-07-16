@@ -28,6 +28,41 @@ License
 #include "OSspecific.H"
 #include "OFstream.H"
 
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+//  Inner product of two fields of the tracked type, returning the scalar field
+//  used by the Welford cycle-variance accumulator  M2 = sum |x - <x>|^2.
+//  Overloaded rather than templated: for a vector field the update is the dot
+//  product, while for a scalar field operator& is not defined and it is just
+//  the product. Defined here (not in BBPA.H) because BBPA.H carries only
+//  volFieldsFwd.H, so the field operators are not visible there.
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+namespace Foam
+{
+namespace functionObjects
+{
+
+inline tmp<volScalarField> bbpaInner
+(
+    const volScalarField& a,
+    const volScalarField& b
+)
+{
+    return a*b;
+}
+
+inline tmp<volScalarField> bbpaInner
+(
+    const volVectorField& a,
+    const volVectorField& b
+)
+{
+    return a & b;
+}
+
+} // End namespace functionObjects
+} // End namespace Foam
+
+
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 //  writePAField: write a volField to a phase-aligned time directory using an
 //  explicit OFstream. regIOobject::write() in OpenFOAM is hard-wired to the
@@ -290,7 +325,21 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
 
                 const FieldType delta2(cycleMean - meanFields_[binI]);
 
-                M2Fields_[binI] += 0.5*(magSqr(delta) + magSqr(delta2));
+                // Welford: M2 += (x - mean_old) . (x - mean_new). For a vector
+                // field, M2 is the scalar sum |x - <x>|^2, so the update is the
+                // INNER PRODUCT of the two deltas.
+                //
+                // This was previously 0.5*(magSqr(delta) + magSqr(delta2)), the
+                // mean of the squared magnitudes, which is not Welford and is
+                // biased HIGH: by AM-GM, 0.5*(|a|^2 + |b|^2) >= a.b for all a,b,
+                // with equality only when a == b. Worked example for two cycles
+                // v1, v2: the true sum of squared deviations is |v2-v1|^2/2,
+                // which delta.delta2 reproduces exactly, whereas the old form
+                // gave 0.625*|v2-v1|^2 -- 25% too large. The error is invisible
+                // on a periodic flow (every cycle identical => variance ~ 0),
+                // which is why it survived; tutorials/planarPoiseuille exercises
+                // it with a developing flow whose cycles genuinely differ.
+                M2Fields_[binI] += bbpaInner(delta, delta2);
 
                 // Running cross-cycle mean of <phi*phi>_bin. Combined
                 // with meanFields_ this recovers Reynolds stress
@@ -432,20 +481,20 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                     dimensioned<SqrType>(meanSqrFields_[binI].dimensions(), Zero)
                 );
 
-                if (hasCrossData && hasCurrentData)
+                if (hasCrossData)
                 {
-                    // Blend finalised cross-cycle stats with current cycle.
-                    const scalar invT = 1.0 / currentCycleBinTime_[binI];
-                    const scalar nOld = binCounts_[binI];
-                    const scalar total = nOld + 1.0;
-                    paUU.primitiveFieldRef() =
-                        (
-                            meanSqrFields_[binI].primitiveField() * nOld
-                          + currentCycleBinSqrSum_[binI].primitiveField() * invT
-                        ) / total;
-                }
-                else if (hasCrossData)
-                {
+                    // The raw second moment over the COMPLETE cycles only --
+                    // exactly as for _PA above, and for the same two reasons:
+                    // blending the in-progress cycle weights a partial bin (one
+                    // timestep, on a perCycle write) as a whole cycle, and this
+                    // file is the checkpoint that restoreBinItemFromDisk() reads
+                    // meanSqrFields_ back out of, so a blended value would be
+                    // restored AS the second moment and compound every restart.
+                    //
+                    // This matters more than _PA: R_ij^bin = <U_iU_j> - <U_i><U_j>
+                    // and k_bin = 0.5*tr(R_ij^bin) are reconstructed FROM this
+                    // field, so a contaminated bin propagates straight into the
+                    // reported Reynolds stress and resolved energy.
                     paUU.primitiveFieldRef() =
                         meanSqrFields_[binI].primitiveField();
                 }

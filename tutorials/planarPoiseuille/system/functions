@@ -1,0 +1,43 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  12
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      functions;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+#includeFunc residuals(p, sigma)
+#includeFunc graphCell(name=graph, start=(0 0 0), end=(0 1 0), U)
+#includeFunc probes(name=probes, points=((0 1 0)), U)
+
+// ************************************************************************* //
+
+bbpaV
+{
+    type            BBPA;
+    libs            ("libPhaseAveraging.so");
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+    writeMode       perCycle;
+    fields          ( U );
+    // Waters-King startup: the flow DEVELOPS, so successive "cycles" genuinely
+    // differ -> the cross-cycle variance is NON-ZERO and can actually be
+    // verified. On a perfectly periodic flow the variance is ~0 and the Welford
+    // bug is invisible -- which is exactly how it survived in bbpaVerify.
+    // 0.9997 is deliberately NOT a multiple of deltaT (5e-3), so no state can
+    // land exactly on a cycle boundary or bin edge and the FO's internal time
+    // can never disagree with the written dir name about which bin a state is in.
+    period          0.9997;
+    nBins           7;
+    startCycle      0;
+}
+
+// ************************************************************************* //

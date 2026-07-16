@@ -66,6 +66,7 @@ namespace functionObjects
 template<class T> struct bbpaSqrTypeOf { typedef T type; };
 template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
 
+
 /*---------------------------------------------------------------------------*\
                           Class BBPA Declaration
 \*---------------------------------------------------------------------------*/

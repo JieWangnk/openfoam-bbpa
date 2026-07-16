@@ -28,23 +28,41 @@ import sys
 import numpy as np
 
 
-def read_internal_vector(path):
-    """Parse an OpenFOAM ascii volVectorField internalField -> (n,3) array.
-    Handles both 'nonuniform List<vector>' and 'uniform (a b c)'."""
+def read_internal(path):
+    """Parse an OpenFOAM ascii volField internalField -> (n,c) array.
+    Handles vector (3), symmTensor (6) and scalar (1), uniform or nonuniform."""
     txt = open(path).read()
     m = re.search(r"internalField\s+uniform\s*\(([^)]*)\)", txt)
     if m:
         return np.array([[float(x) for x in m.group(1).split()]])
-    m = re.search(r"internalField\s+nonuniform\s+List<vector>\s*\n?\s*(\d+)\s*\(", txt)
+    m = re.search(r"internalField\s+uniform\s+([-0-9.eE+]+)\s*;", txt)
+    if m:
+        return np.array([[float(m.group(1))]])
+    m = re.search(r"internalField\s+nonuniform\s+List<(\w+)>\s*\n?\s*(\d+)\s*\(", txt)
     if not m:
         raise RuntimeError(f"cannot parse internalField in {path}")
-    n = int(m.group(1))
+    kind, n = m.group(1), int(m.group(2))
     body = txt[m.end():]
-    vals = re.findall(r"\(([^)]*)\)", body[: body.index("\n)")+2] if "\n)" in body else body)
-    arr = np.array([[float(x) for x in v.split()] for v in vals[:n]])
+    chunk = body[: body.index("\n)")+2] if "\n)" in body else body
+    if kind == "scalar":
+        vals = re.findall(r"[-0-9.eE+]+", chunk)
+        arr = np.array([[float(v)] for v in vals[:n]])
+    else:
+        vals = re.findall(r"\(([^)]*)\)", chunk)
+        arr = np.array([[float(x) for x in v.split()] for v in vals[:n]])
     if arr.shape[0] != n:
-        raise RuntimeError(f"{path}: expected {n} vectors, parsed {arr.shape[0]}")
+        raise RuntimeError(f"{path}: expected {n} entries, parsed {arr.shape[0]}")
     return arr
+
+
+# back-compat alias
+read_internal_vector = read_internal
+
+
+def sqr_sym(U):
+    """<U_i U_j> as OpenFOAM's symmTensor component order (xx xy xz yy yz zz)."""
+    x, y, z = U[:, 0], U[:, 1], U[:, 2]
+    return np.stack([x*x, x*y, x*z, y*y, y*z, z*z], axis=1)
 
 
 def time_dirs(case):
@@ -118,7 +136,7 @@ def main():
     times = np.array([t for t, _ in traj])
     # accumulate: for each state k>0 the FO accumulated U(t_k)*dt_k into the bin
     # of phase(t_k)
-    sums, wts = {}, {}
+    sums, sqsums, wts = {}, {}, {}
     # The FO's execute() runs at every time it is called and does
     #   accumulate(phaseBin(), field, time_.deltaT())
     # If it is called at the very first time (the initial condition), it folds
@@ -134,9 +152,12 @@ def main():
         ph = (t - start_time) % a.period
         j = min(int(ph / dT), a.nbins - 1)
         n = int((t - start_time) // a.period)          # cycle index
-        U = read_internal_vector(os.path.join(case, traj[k][1], "U"))
+        U = read_internal(os.path.join(case, traj[k][1], "U"))
         key = (n, j)
         sums[key] = sums.get(key, 0.0) + U * dt
+        # raw second moment <U_i U_j>: the FO accumulates sqr(U)*dt in the SAME
+        # bin, so re-derive it the same way. R_ij^bin and k_bin come from this.
+        sqsums[key] = sqsums.get(key, 0.0) + sqr_sym(U) * dt
         wts[key] = wts.get(key, 0.0) + dt
 
     # Per-cycle bin means, then the cross-cycle mean = what U_PA should hold.
@@ -155,11 +176,22 @@ def main():
     present = [n for n in present if n >= a.start_cycle]
     cycles = present[:ncycles]          # folded = the first nCycles from startCycle
     print(f"[truth] cycles on disk: {present} ; FO folded {ncycles} -> comparing {cycles}")
-    expect = {}
+    expect, expect_uu, expect_var = {}, {}, {}
     for j in range(a.nbins):
-        vals = [sums[(n, j)] / wts[(n, j)] for n in cycles if (n, j) in wts and wts[(n, j)] > 0]
-        if vals:
-            expect[j] = (np.mean(vals, axis=0), len(vals))
+        ok = [n for n in cycles if (n, j) in wts and wts[(n, j)] > 0]
+        if not ok:
+            continue
+        # per-cycle bin means / bin second moments
+        cyc_mean = [sums[(n, j)] / wts[(n, j)] for n in ok]
+        cyc_uu   = [sqsums[(n, j)] / wts[(n, j)] for n in ok]
+        expect[j]    = (np.mean(cyc_mean, axis=0), len(ok))   # <name>_PA
+        expect_uu[j] = (np.mean(cyc_uu, axis=0), len(ok))     # <name>_PA_UU  = mean over cycles of <U_iU_j>_bin
+        # <name>_PAVariance = M2/(n-1) where M2 = sum |x - mean|^2 of the per-cycle
+        # BIN MEANS (Welford over cycles) -> the cross-cycle sample variance
+        if len(ok) > 1:
+            m = np.mean(cyc_mean, axis=0)
+            m2 = np.sum([np.sum((v - m)**2, axis=1) for v in cyc_mean], axis=0)
+            expect_var[j] = (m2 / (len(ok) - 1.0), len(ok))
 
     # ---- the FO's answer: U_PA in the phase-aligned dirs of the LAST written window
     # find the newest dir set holding U_PA
@@ -170,36 +202,44 @@ def main():
     latest = pa[-a.nbins:]
     print(f"[fo]  U_PA window: t={latest[0][0]} .. {latest[-1][0]}  ({len(latest)} bins)")
 
-    print(f"\n{'bin':>3} {'t_dir':>9} {'|U_PA| (FO)':>12} {'|U| expected':>13} "
-          f"{'max abs diff':>13} {'n_cyc':>6}")
-    worst = 0.0
+    print(f"\n{'bin':>3} {'t_dir':>16} {'_PA':>12} {'_PA_UU':>12} {'_PAVariance':>13}")
+    worst = {"_PA": 0.0, "_PA_UU": 0.0, "_PAVariance": 0.0}
     nbad = 0
     for i, (t, d) in enumerate(latest):
-        # The window's dirs are cycleStart + j*binDeltaT in increasing order, so
-        # the bin index is simply the POSITION in that window. Do NOT re-derive it
-        # from (t - startTime) % period: at the window start that modulo lands on
-        # period-epsilon instead of 0 (FP), which mislabels bin 0 as the last bin
-        # and silently compares it against the wrong truth.
+        # bin index = POSITION in the window (see note above)
         j = i
-        fo = read_internal_vector(os.path.join(case, d, "U_PA"))
-        if j not in expect:
-            print(f"{j:>3} {d:>9}  (no truth for this bin)")
-            continue
-        ex, ncyc = expect[j]
+        row = {}
+        # --- first moment
+        fo = read_internal(os.path.join(case, d, "U_PA"))
+        ex = expect[j][0]
         if ex.shape[0] == 1 and fo.shape[0] > 1:
             ex = np.repeat(ex, fo.shape[0], axis=0)
-        diff = np.max(np.abs(fo - ex))
-        worst = max(worst, diff)
-        flag = "" if diff <= a.tol else "   <-- MISMATCH"
-        if diff > a.tol:
-            nbad += 1
-        print(f"{j:>3} {d:>9} {np.linalg.norm(fo.mean(axis=0)):>12.6f} "
-              f"{np.linalg.norm(ex.mean(axis=0)):>13.6f} {diff:>13.3e} {ncyc:>6}{flag}")
+        row["_PA"] = np.max(np.abs(fo - ex))
+        # --- raw second moment <U_i U_j>  (R_ij and k_bin come from this)
+        p_uu = os.path.join(case, d, "U_PA_UU")
+        if os.path.exists(p_uu) and j in expect_uu:
+            fo_uu = read_internal(p_uu)
+            ex_uu = expect_uu[j][0]
+            row["_PA_UU"] = np.max(np.abs(fo_uu - ex_uu))
+        # --- cross-cycle variance of the bin mean
+        p_v = os.path.join(case, d, "U_PAVariance")
+        if os.path.exists(p_v) and j in expect_var:
+            fo_v = read_internal(p_v)
+            ex_v = expect_var[j][0].reshape(-1, 1)
+            row["_PAVariance"] = np.max(np.abs(fo_v - ex_v))
+        bad = any(v > a.tol for v in row.values())
+        nbad += 1 if bad else 0
+        for k2 in worst:
+            worst[k2] = max(worst[k2], row.get(k2, 0.0))
+        cells = " ".join(f"{row.get(k2, float('nan')):12.3e}" for k2 in ("_PA", "_PA_UU", "_PAVariance"))
+        print(f"{j:>3} {d:>16} {cells}{'   <-- MISMATCH' if bad else ''}")
 
-    print(f"\nworst |FO - independent| = {worst:.3e}   (tol {a.tol:g})")
-    if nbad == 0 and worst <= a.tol:
-        print("PASS: the in-situ bin averages reproduce an independent re-derivation "
-              "of the same trajectory to round-off.")
+    print()
+    for k2 in ("_PA", "_PA_UU", "_PAVariance"):
+        print(f"  worst |FO - independent| {k2:<12} = {worst[k2]:.3e}")
+    print(f"  (tol {a.tol:g})")
+    if nbad == 0 and max(worst.values()) <= a.tol:
+        print("PASS: _PA, _PA_UU and _PAVariance all reproduce an independent\n      re-derivation of the same trajectory to round-off.")
         return 0
     print(f"FAIL: {nbad} bin(s) disagree beyond tolerance.")
     return 2
