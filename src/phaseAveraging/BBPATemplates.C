@@ -339,13 +339,22 @@ Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
     {
         if (!currentCycleBinSum_.set(binI)) continue;
 
-        // Only bins whose window closed strictly before the restart instant
-        // can have been written whole. The bin CONTAINING the restart instant
-        // is partial by definition and must not be recovered -- the straddle
-        // guard drops it instead.
-        const scalar binEnd =
-            cycleStartTime + (binI + 1)*binDeltaT - centreOffset;
-        if (now < binEnd - 1e-9*binDeltaT) continue;
+        // Recover any bin whose window STARTED before the restart instant and
+        // whose complete <field>_Bin is on disk. This deliberately INCLUDES the
+        // bin that CONTAINS the restart instant (the straddled bin): the flush
+        // only ever writes a CLOSED window, so an on-disk _Bin is the WHOLE
+        // window average -- strictly better than re-accumulating only its
+        // post-restart part. This is what lets a restart from an EARLIER write
+        // (e.g. one write before the kill) lose nothing even with binCentred:
+        // the bin centred on that write has its complete _Bin on disk from
+        // before the kill, so it is recovered rather than straddle-dropped.
+        //
+        // A bin whose window starts at or after the restart has no pre-restart
+        // data (its dir was never written, or was trimmed) and is re-accumulated
+        // by the resumed solver instead.
+        const scalar binStart =
+            cycleStartTime + binI*binDeltaT - centreOffset;
+        if (binStart >= now - 1e-9*binDeltaT) continue;
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;
         const word binTimeName = Time::timeName(binTime);
@@ -431,6 +440,15 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
     // allocated, do nothing -- and crucially do NOT touch
     // currentCycleBinTime_, so finalizeCycle()/write() skip it too.
     if (!currentCycleBinSum_.set(binI)) return;
+
+    // A bin already recovered from disk this cycle (binFlushed_) holds its
+    // COMPLETE window average. When a restart resumes from an EARLIER write the
+    // solver re-runs that bin's phase; adding those steps again would
+    // double-count the recovered window, so skip it. binFlushed_ is empty
+    // outside "bin" mode (no-op there), and in normal forward running phaseBin
+    // never revisits a flushed bin within a cycle (no-op there too) -- this
+    // only bites on a restart-from-earlier re-run.
+    if (!binFlushed_.empty() && binFlushed_[binI]) return;
 
     // Time-weighted accumulation: phi(t)*dt (first moment) and
     // sqr(phi(t))*dt (second moment). For vector phi, sqr() returns

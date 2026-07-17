@@ -298,17 +298,48 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
 
     if (phase - binStart > 1e-9*binDeltaT_)
     {
-        straddledBin_ = binI;
-        straddledCycle_ = cyc;
+        // If this straddled bin's COMPLETE _Bin is already on disk, the run
+        // resumed from a write EARLIER than the one that closed this bin, so
+        // restoreCurrentCycleBins recovered the whole window -- do NOT drop it.
+        // Only drop when it is genuinely unrecoverable: the cold-start bin 0
+        // (nothing on disk yet), or a restart from the very write that straddles
+        // a bin whose window had not closed (hence not flushed) before the kill.
+        bool recoverable = false;
+        if (binNaming_ && !fieldNames_.empty())
+        {
+            const scalar labelTime =
+                startTime_ + cyc*period_ + binI*binDeltaT_;
+            const fileName binFile =
+                mesh_.time().path()/Time::timeName(labelTime)
+               /(fieldNames_[0] + "_Bin");
+            recoverable = Foam::isFile(binFile);
+        }
 
-        WarningInFunction
-            << "run begins at t=" << runStartTime_ << " (phase " << phase
-            << "), strictly inside bin " << binI << " [" << binStart << ", "
-            << binStart + binDeltaT_ << "): that bin's window is only partially"
-            << " covered in cycle " << cyc << "." << nl
-            << "    Dropping bin " << binI << " for cycle " << cyc
-            << " rather than folding a partial-window mean in at full weight"
-            << " (unbiased, one cycle noisier)." << endl;
+        if (recoverable)
+        {
+            straddledBin_ = -1;
+            straddledCycle_ = -1;
+            Info<< "    bin " << binI << " straddled by the restart, but its "
+                << "complete _Bin is on disk -> recovered whole, not dropped "
+                << "(zero loss)." << endl;
+        }
+        else
+        {
+            straddledBin_ = binI;
+            straddledCycle_ = cyc;
+
+            WarningInFunction
+                << "run begins at t=" << runStartTime_ << " (phase " << phase
+                << "), strictly inside bin " << binI << " [" << binStart << ", "
+                << binStart + binDeltaT_ << "): that bin's window is only "
+                << "partially covered in cycle " << cyc << " and no complete "
+                << "_Bin is on disk." << nl
+                << "    Dropping bin " << binI << " for cycle " << cyc
+                << " rather than folding a partial-window mean in at full weight"
+                << " (unbiased, one cycle noisier). To avoid it, resume from one"
+                << " write EARLIER so this bin's window is recovered whole."
+                << endl;
+        }
     }
     else
     {
