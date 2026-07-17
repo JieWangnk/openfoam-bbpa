@@ -29,6 +29,8 @@ License
 #include "addToRunTimeSelectionTable.H"
 #include "timeIOdictionary.H"
 #include "IFstream.H"
+#include "DynamicList.H"
+#include "Switch.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -72,7 +74,10 @@ static inline Foam::label bbpaSnapFloor(const Foam::scalar x)
 
 Foam::label Foam::functionObjects::BBPA::phaseBin() const
 {
-    const scalar t = time_.value() - startTime_;
+    // phaseOrigin_ == startTime_ normally; startTime_ - dT/2 when binCentred_,
+    // which makes bin j cover [j*dT - dT/2, j*dT + dT/2) in the user's phase,
+    // i.e. CENTRED on its label time j*dT rather than starting there.
+    const scalar t = time_.value() - phaseOrigin_;
     scalar phase = std::fmod(t, period_);
 
     // fmod can return period-1ulp instead of 0 for an on-grid time, which
@@ -85,7 +90,11 @@ Foam::label Foam::functionObjects::BBPA::phaseBin() const
 
 Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 {
-    const scalar t = time_.value() - startTime_;
+    // Must use the SAME origin as phaseBin(): with binCentred_ the cycle runs
+    // [n*T - dT/2, (n+1)*T - dT/2) so that bin 0, centred on phase 0, lies
+    // wholly inside one cycle instead of straddling the boundary and losing
+    // its first half to the cycle reset.
+    const scalar t = time_.value() - phaseOrigin_;
     return bbpaSnapFloor(t/period_);
 }
 
@@ -254,6 +263,53 @@ Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
 }
 
 
+void Foam::functionObjects::BBPA::flagStraddledBin()
+{
+    // The bin containing the instant this run BEGAN covers only the part of its
+    // phase window lying after that instant, yet finalizeCycle() would fold it
+    // in as a complete cycle at full weight -- a partial-window mean, biased
+    // toward whichever phases follow the start, and indistinguishable from a
+    // healthy value on disk.
+    //
+    // This is a property of the START INSTANT, so it applies to a cold start
+    // exactly as much as to a restart. With binCentred, bin 0 of the first
+    // cycle wants [-dT/2, +dT/2) but the run begins at startTime: half that
+    // window never existed. The check below catches both.
+    //
+    // Detect it exactly, not by a coverage heuristic: the bin is straddled iff
+    // the start phase lies STRICTLY INSIDE it. Beginning exactly on a bin edge
+    // (the ordinary uncentred cold start) covers the bin fully and must not be
+    // dropped.
+    const scalar tRes = runStartTime_ - phaseOrigin_;
+    scalar phase = std::fmod(tRes, period_);
+    if (phase > period_*(1.0 - 1e-12)) phase = 0;
+
+    const label binI = min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+    const scalar binStart = binI*binDeltaT_;
+    const label cyc = bbpaSnapFloor(tRes/period_);
+
+    if (phase - binStart > 1e-9*binDeltaT_)
+    {
+        straddledBin_ = binI;
+        straddledCycle_ = cyc;
+
+        WarningInFunction
+            << "run begins at t=" << runStartTime_ << " (phase " << phase
+            << "), strictly inside bin " << binI << " [" << binStart << ", "
+            << binStart + binDeltaT_ << "): that bin's window is only partially"
+            << " covered in cycle " << cyc << "." << nl
+            << "    Dropping bin " << binI << " for cycle " << cyc
+            << " rather than folding a partial-window mean in at full weight"
+            << " (unbiased, one cycle noisier)." << endl;
+    }
+    else
+    {
+        straddledBin_ = -1;
+        straddledCycle_ = -1;
+    }
+}
+
+
 void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
 {
     // Phase-aligned time directories for the cycle the accumulator actually
@@ -351,6 +407,9 @@ Foam::functionObjects::BBPA::BBPA
     previousBin_(-1),
     lastFullWriteCycle_(-1),
     binNaming_(false),
+    binsAtWriteTimes_(false),
+    binCentred_(false),
+    phaseOrigin_(0),
     paWriteInterval_(1),
     checkpointSearched_(false),
     checkpointPath_(fileName::null),
@@ -360,6 +419,8 @@ Foam::functionObjects::BBPA::BBPA
     legacyStart_probed_(false),
     straddledBin_(-1),
     straddledCycle_(-1),
+    straddleChecked_(false),
+    runStartTime_(runTime.value()),
     scalarBinItems_(),
     vectorBinItems_()
 {
@@ -427,6 +488,88 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     // cycles. The per-cycle _Bin file is always written.
     paWriteInterval_ = dict.lookupOrDefault<label>("PAwriteInterval", 1);
 
+
+    // Phase origin: explicit override or auto-align to nearest
+    // cycle boundary at or before the current time.
+    if (dict.found("startTime"))
+    {
+        startTime_ = dict.lookup<scalar>("startTime");
+    }
+    else
+    {
+        startTime_ = std::floor(time_.value() / period_) * period_;
+    }
+
+    binDeltaT_ = period_/nBins_;
+
+    // "bin" mode conveniences: derive the tracked bins from the solver's write
+    // times, and centre each bin's window on its label.
+    binsAtWriteTimes_ = dict.lookupOrDefault<Switch>("binsAtWriteTimes", false);
+    binCentred_ = dict.lookupOrDefault<Switch>("binCentred", false);
+
+    if (binsAtWriteTimes_)
+    {
+        if (!binsOfInterest_.empty())
+        {
+            WarningInFunction
+                << "both binsAtWriteTimes and an explicit binsOfInterest were "
+                << "given; keeping the explicit list." << endl;
+        }
+        else
+        {
+            const scalar wi =
+                time_.controlDict().lookupOrDefault<scalar>("writeInterval", -1);
+            const word wc =
+                time_.controlDict().lookupOrDefault<word>
+                (
+                    "writeControl", word::null
+                );
+
+            if (wc != "runTime" || wi <= 0)
+            {
+                FatalErrorInFunction
+                    << "binsAtWriteTimes needs writeControl runTime with a "
+                    << "positive writeInterval to know where the write times "
+                    << "are (found writeControl " << wc << ", writeInterval "
+                    << wi << ")." << exit(FatalError);
+            }
+
+            // A bin is labelled j*binDeltaT_ and coincides with a write time
+            // k*wi exactly when j is a multiple of wi/binDeltaT_. That ratio
+            // must be a whole number or no bin label ever lands on a write.
+            const scalar ratio = wi/binDeltaT_;
+            const label stride = label(std::round(ratio));
+
+            if (mag(ratio - stride) > 1e-6 || stride < 1)
+            {
+                FatalErrorInFunction
+                    << "binsAtWriteTimes requires the solver writeInterval ("
+                    << wi << ") to be an integer multiple of the bin width "
+                    << "period/nBins (" << binDeltaT_ << "); the ratio is "
+                    << ratio << "." << nl
+                    << "    No bin label can land on a write time otherwise. "
+                    << "Choose nBins so that period/nBins divides " << wi << "."
+                    << exit(FatalError);
+            }
+
+            DynamicList<label> bins;
+            for (label j = 0; j < nBins_; j += stride)
+            {
+                bins.append(j);
+            }
+            binsOfInterest_ = bins;
+
+            Info<< "    binsAtWriteTimes: writeInterval " << wi
+                << " / binWidth " << binDeltaT_ << " = stride " << stride
+                << " -> tracking " << binsOfInterest_.size() << " of "
+                << nBins_ << " bins, all landing on solver write times"
+                << endl;
+        }
+    }
+
+    // Centring is a shift of the phase AND cycle origin by half a bin. The bin
+    // LABELS keep using startTime_, so they stay on the write times; only the
+    // window they describe moves to be centred on them.
     if (binNaming_)
     {
         // Warn when the bins will NOT land on the solver's write times, since
@@ -445,18 +588,47 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         // bins fall at 0.0025, 0.005, 0.0075 -- times the solver never writes.
         // That is the very configuration this warning exists to catch.
         //
-        // NB: binDeltaT_ is not assigned until below, so use period_/nBins_.
+        // Runs AFTER binsAtWriteTimes derived binsOfInterest_: checking before
+        // it would warn about bins that are about to be aligned.
         // Time has no public writeInterval() accessor, so read controlDict.
-        const scalar binWidth = period_/nBins_;
+        const scalar binWidth = binDeltaT_;
         const scalar wi =
             time_.controlDict().lookupOrDefault<scalar>("writeInterval", -1);
         const word wc =
             time_.controlDict().lookupOrDefault<word>("writeControl", word::null);
 
+        // In sparse-bin mode only the LISTED bins are written, so the test is
+        // whether each of THOSE lands on a write time -- not whether every bin
+        // would. The recommended configuration is exactly this: a fine bin width
+        // for sharpness, with binsOfInterest picking the subset that coincides
+        // with the solver's writes (e.g. period 0.5, nBins 100 -> bin 0.005,
+        // writeInterval 0.02, bins 0 4 8 ... -> 25 co-located bins at I=100
+        // sharpness). Testing all 100 bins there would warn about directories
+        // that are never created.
+        bool misaligned = false;
         if (wi > 0 && wc == "runTime")
         {
-            const scalar ratio = binWidth/wi;
-            if (mag(ratio - std::round(ratio)) > 1e-6)
+            if (binsOfInterest_.empty())
+            {
+                const scalar ratio = binWidth/wi;
+                misaligned = mag(ratio - std::round(ratio)) > 1e-6;
+            }
+            else
+            {
+                forAll(binsOfInterest_, k)
+                {
+                    const scalar r = binsOfInterest_[k]*binWidth/wi;
+                    if (mag(r - std::round(r)) > 1e-6)
+                    {
+                        misaligned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (misaligned)
+        {
             {
                 WarningInFunction
                     << "writeMode 'bin': the bin width period/nBins ("
@@ -473,18 +645,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         }
     }
 
-    // Phase origin: explicit override or auto-align to nearest
-    // cycle boundary at or before the current time.
-    if (dict.found("startTime"))
-    {
-        startTime_ = dict.lookup<scalar>("startTime");
-    }
-    else
-    {
-        startTime_ = std::floor(time_.value() / period_) * period_;
-    }
-
-    binDeltaT_ = period_/nBins_;
+    phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
 
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
@@ -522,6 +683,15 @@ bool Foam::functionObjects::BBPA::execute()
     if (initializeBinItems())
     {
         readCheckpoint();
+    }
+
+    // Once, after startTime_/phaseOrigin_ are final (readCheckpoint may have
+    // changed them). Covers the cold start too, which never reaches
+    // readCheckpoint's guard because there is no checkpoint to read.
+    if (!straddleChecked_)
+    {
+        straddleChecked_ = true;
+        flagStraddledBin();
     }
 
     const label binI = phaseBin();
@@ -803,6 +973,12 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         currentCycle_ = propsDict.lookup<label>("currentCycle");
         previousCycle_ = propsDict.lookup<label>("previousCycle");
 
+        // startTime_ has just changed, so the derived phase origin must follow
+        // it. Missing this would leave phaseOrigin_ at the value read() derived
+        // from the RESTART time, silently un-centring every bin after a restart
+        // while the labels stayed put.
+        phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
+
         // Straddled-bin guard. The run resumes at the last WRITTEN time, which
         // need not be a bin boundary. The bin containing that instant will now
         // accumulate only the part of its phase window lying after the restart,
@@ -815,41 +991,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // straddled iff the restart phase lies STRICTLY INSIDE it. Landing
         // exactly on a bin edge (the aorta's binWidth == writeInterval case)
         // covers the bin fully and must not be dropped.
-        {
-            const scalar tRes = time_.value() - startTime_;
-            scalar phase = std::fmod(tRes, period_);
-            if (phase > period_*(1.0 - 1e-12)) phase = 0;
-
-            const label binI = min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
-            const scalar binStart = binI*binDeltaT_;
-
-            // strictly inside => the earlier part of this bin's window is gone
-            if (phase - binStart > 1e-9*binDeltaT_)
-            {
-                straddledBin_ = binI;
-                straddledCycle_ = currentCycle_;
-
-                WarningInFunction
-                    << "Restart at t=" << time_.value() << " (phase "
-                    << phase << ") lands INSIDE bin " << binI
-                    << " [" << binStart << ", " << binStart + binDeltaT_
-                    << "): that bin's window is only partially covered in cycle "
-                    << currentCycle_ << "." << nl
-                    << "    Dropping bin " << binI << " for cycle "
-                    << currentCycle_ << " rather than folding a partial-window "
-                    << "mean in at full weight (unbiased, one cycle noisier)."
-                    << nl
-                    << "    To avoid this entirely, make the solver "
-                    << "writeInterval an integer multiple of period/nBins ("
-                    << binDeltaT_ << ") so restarts always land on a bin edge."
-                    << endl;
-            }
-            else
-            {
-                straddledBin_ = -1;
-                straddledCycle_ = -1;
-            }
-        }
+        // (straddle is flagged by flagStraddledBin(), called from execute())
 
         // Capture the checkpoint's cycle start so a late-registering field
         // is restored from the phase-aligned dirs the checkpoint actually

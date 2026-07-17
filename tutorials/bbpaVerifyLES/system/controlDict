@@ -18,15 +18,15 @@ application     foamRun;
 
 solver          incompressibleFluid;
 
-startFrom       latestTime;
+startFrom       startTime;
 
 startTime       0;
 
 stopAt          endTime;
 
-endTime         5.05;
+endTime         2.55;
 
-deltaT          0.001;
+deltaT          2.5e-4;
 
 writeControl    runTime;
 
@@ -72,28 +72,43 @@ functions
         PAwriteInterval 1;
         fields          ( U wallShearStress );
 
-        // The physical inlet period is exactly 1.0 (verified: rms mismatch of
-        // the mean waveform is 0.0034 at lag 1.0 vs 0.565 at lag 0.5).
+        // TURBULENT / TRANSITIONAL configuration.
         //
-        // ON-GRID configuration, deliberately. period 1.0 with I=20 gives a bin
-        // width of 0.05 = exactly 50 timesteps, so every bin edge and cycle
-        // boundary lands ON a timestep and the bin times are round numbers:
-        // 2.0, 2.05 ... 2.90, 2.95.
+        // The inlet boundaryData record has been rescaled t -> t/2, so the
+        // forcing period is 0.5 (verified: rms mismatch of the mean waveform is
+        // 0.0034 at lag 0.5 vs 0.565 at lag 0.25). Same waveform, replayed
+        // twice as fast: omega doubles, so the Womersley number grows by
+        // sqrt(2) and the flow is more unsteady. The mesh is doubled in every
+        // direction (80 12 12 = 11520) to resolve it, and dt is halved to 5e-4
+        // to hold the Courant number (~0.57: dx is 0.833mm, a third of the
+        // previous 2.5mm, which would otherwise triple it to ~1.15).
         //
-        // This is the situation the production runs are actually in -- the
-        // aorta uses period 0.5 with I=50, i.e. bin width 0.01 = its
-        // writeInterval -- and it is what makes the bin directories coincide
-        // with the solver's own write folders rather than landing on values
-        // like 2.89913.
+        // Cycle-to-cycle variation remains inlet-driven -- the record carries a
+        // ~0.07 rms perturbation that differs every cycle -- so the phase
+        // average, the second moment and the variance are all non-trivial.
         //
-        // It is also the harder case to verify: the FO bins on its internal
-        // double for t while the checker reads t from the directory name, and
-        // at a boundary those can differ by 1 ulp and put a step in a different
-        // bin. That is a checker artifact rather than an FO defect, but it has
-        // to be confronted rather than dodged.
-        period          1.0;
-        nBins           25;
-        startCycle      0;
+        // ON-GRID: bin width 0.005 = 10 timesteps, so every bin edge lands on a
+        // timestep. That is the production situation (the aorta's I=50 gives
+        // bin width 0.01 = its writeInterval), and it is what the phaseBin
+        // snap-then-truncate exists to make deterministic.
+        period          0.5;
+        nBins           100;
+
+        // Derive the tracked bins from the solver's write times instead of
+        // listing them by hand: stride = writeInterval/binWidth = 0.02/0.005 = 4,
+        // so bins 0,4,8...96 -- 25 of 100, each landing in a write folder.
+        // A hand list silently rots the moment nBins or writeInterval changes.
+        binsAtWriteTimes true;
+
+        // Centre each bin on its label: dir 0.02 holds the average of
+        // [0.0175, 0.0225] rather than [0.020, 0.025). Removes the half-bin
+        // phase lag at source instead of correcting for it in post-processing.
+        binCentred      true;
+
+        // Cycle 0 is startup AND, with binCentred, its bin 0 is only half
+        // covered (the run begins at t=0, but a centred bin 0 wants
+        // [-dT/2, +dT/2)). Averaging from cycle 1 sidesteps both.
+        startCycle      1;
     }
 }
 

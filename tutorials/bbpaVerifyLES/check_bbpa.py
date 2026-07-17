@@ -128,6 +128,18 @@ def read_all(path, patches):
     return out
 
 
+def phase_origin(start_time, dT, centred):
+    """The origin the FO bins against.
+
+    With binCentred the FO shifts BOTH the phase and the cycle origin by -dT/2,
+    so bin j covers [j*dT - dT/2, j*dT + dT/2) -- centred on its label j*dT
+    rather than starting there. The cycle shifts with it so that bin 0, centred
+    on phase 0, lies wholly inside one cycle instead of straddling the boundary.
+    Bin LABELS still use start_time, so they stay on the write times.
+    """
+    return start_time - 0.5*dT if centred else start_time
+
+
 def phase_bin(t, start_time, period, dT, nbins):
     """Bin index for time t -- the same snap-then-truncate the FO uses.
 
@@ -194,6 +206,13 @@ def main():
                     help="BBPA phase origin; 'auto' reads it from *Properties")
     ap.add_argument("--tol", type=float, default=1e-8)
     ap.add_argument("--start-cycle", type=int, default=0)
+    ap.add_argument("--suffix", default="_PA",
+                    help="output naming: '_PA' (default modes) or '_BinPA' "
+                         "(writeMode bin). The FO writes <field><suffix>, "
+                         "<field><suffix>_UU and <field><suffix>Variance.")
+    ap.add_argument("--centred", action="store_true",
+                    help="the FO ran with binCentred: bins are centred on their "
+                         "label time, so the phase AND cycle origin shift by -dT/2")
     ap.add_argument("--include-t0", action="store_true",
                     help="fold the initial condition with a full dt, as the FO "
                          "does if its execute() is called at the first time")
@@ -256,8 +275,9 @@ def main():
         dt = (times[k] - times[k-1]) if k > 0 else (times[1] - times[0])
         if t < start_time - 1e-12:
             continue
-        j = phase_bin(t, start_time, a.period, dT, a.nbins)
-        n = cycle_number(t, start_time, a.period)
+        origin = phase_origin(start_time, dT, a.centred)
+        j = phase_bin(t, origin, a.period, dT, a.nbins)
+        n = cycle_number(t, origin, a.period)
         F = read_all(os.path.join(case, traj[k][1], fld), a.patches)
         key = (n, j)
         if key not in wts:
@@ -298,11 +318,11 @@ def main():
 
     # ---- the FO's answer ----------------------------------------------------
     pa = [(t, d) for (t, d) in tds
-          if os.path.exists(os.path.join(case, d, f"{fld}_PA"))]
+          if os.path.exists(os.path.join(case, d, f"{fld}{a.suffix}"))]
     if not pa:
-        print(f"[err] no {fld}_PA written"); return 1
+        print(f"[err] no {fld}{a.suffix} written"); return 1
     latest = pa[-a.nbins:]
-    print(f"[fo]  {fld}_PA window: t={latest[0][0]} .. {latest[-1][0]} ({len(latest)} bins)")
+    print(f"[fo]  {fld}{a.suffix} window: t={latest[0][0]} .. {latest[-1][0]} ({len(latest)} bins)")
 
     suffixes = ("_PA", "_PA_UU", "_PAVariance")
     print(f"\n{'bin':>3} {'region':>10} {'t_dir':>16} "
@@ -316,7 +336,7 @@ def main():
             continue
         for r in expect[j]:
             row = {}
-            p_pa = os.path.join(case, d, f"{fld}_PA")
+            p_pa = os.path.join(case, d, f"{fld}{a.suffix}")
             fo = read_all(p_pa, a.patches).get(r)
             if fo is None:
                 continue
@@ -327,7 +347,7 @@ def main():
             if np.abs(ex).max() > 1e-12:
                 checked_nontrivial["_PA"] = True
 
-            p_uu = os.path.join(case, d, f"{fld}_PA_UU")
+            p_uu = os.path.join(case, d, f"{fld}{a.suffix}_UU")
             if os.path.exists(p_uu) and j in expect_uu:
                 fo_uu = read_all(p_uu, a.patches).get(r)
                 if fo_uu is not None:
@@ -338,7 +358,7 @@ def main():
                     if np.abs(ex_uu).max() > 1e-12:
                         checked_nontrivial["_PA_UU"] = True
 
-            p_v = os.path.join(case, d, f"{fld}_PAVariance")
+            p_v = os.path.join(case, d, f"{fld}{a.suffix}Variance")
             if os.path.exists(p_v) and j in expect_var:
                 fo_v = read_all(p_v, a.patches).get(r)
                 if fo_v is not None:
@@ -370,7 +390,7 @@ def main():
             print(f"INCONCLUSIVE: {', '.join(vacuous)} compared only ~zero values; "
                   f"that verifies nothing.")
             return 3
-        print(f"PASS: {fld}_PA, _PA_UU and _PAVariance all reproduce an independent\n"
+        print(f"PASS: {fld}{a.suffix}, {a.suffix}_UU and {a.suffix}Variance reproduce an independent\n"
               f"      re-derivation of the same trajectory to round-off.")
         return 0
     print(f"FAIL: {nbad} comparison(s) disagree beyond tolerance.")

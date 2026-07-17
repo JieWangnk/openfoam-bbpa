@@ -20,14 +20,25 @@ vertices
     (0 10 10)
 );
 
-// Coarsened from the parent pulsatilePipeLES (400 20 20)=160k to (40 6 6)=1440.
+// Coarsened from the parent pulsatilePipeLES (400 20 20)=160k to
+// (240 12 12)=34560.
+//
+// The domain is a 200 x 10 x 10 mm duct -- 20:1 long, square section -- so
+// CUBIC cells require nx = 20*ny. The parent satisfied that (0.5 mm cubic);
+// an earlier coarsening here did not: it cut x by 10x but y,z by only 3.3x,
+// leaving 2.5 x 0.833 x 0.833 cells, 3:1 stretched. That is harmless for
+// verifying the function object's arithmetic (cell shape does not enter it)
+// but wrong for LES: WALE's cubeRootVol delta collapses dx,dy,dz into a single
+// (dx*dy*dz)^(1/3), which only means what it says when the cell is isotropic.
+//
+// (240 12 12) restores cubic 0.833 mm cells while keeping 12 across the duct.
 // The verification target is the function object's arithmetic, not the LES
 // physics: cycle-to-cycle variance here is inlet-driven (the boundaryData
 // record carries a ~0.07 rms perturbation that differs every cycle), so it
 // survives coarsening even where the interior cannot sustain turbulence.
 blocks
 (
-    hex (0 1 2 3 4 5 6 7) (40 6 6) simpleGrading (1 1 1)
+    hex (0 1 2 3 4 5 6 7) (240 12 12) simpleGrading (1 1 1)
 );
 
 boundary

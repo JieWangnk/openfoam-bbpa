@@ -154,6 +154,46 @@ class BBPA
         //  side by side and no extra directories are created.
         bool binNaming_;
 
+        //- "bin" mode: derive binsOfInterest automatically from the solver's
+        //  writeInterval instead of requiring it by hand.
+        //
+        //  A bin is labelled at j*binDeltaT_, so it coincides with a solver
+        //  write time k*writeInterval exactly when j is a multiple of
+        //  writeInterval/binDeltaT_. Listing those by hand
+        //  ("binsOfInterest (0 4 8 ... 96)") is busywork that silently goes
+        //  wrong the moment writeInterval or nBins changes -- the FO would keep
+        //  binning phases nobody writes, and create directories of its own.
+        //  Deriving it removes that whole class of mistake.
+        //
+        //  Requires writeInterval to be an integer multiple of binDeltaT_,
+        //  which is exactly the condition for a bin label to land on a write
+        //  time at all.
+        bool binsAtWriteTimes_;
+
+        //- "bin" mode: centre each bin's window on its label time instead of
+        //  starting it there.
+        //
+        //  A rectangular average over [t_j, t_j+dT) represents the signal at
+        //  the window's CENTRE, not its left edge, so labelling it t_j imposes
+        //  a half-bin phase lag -- a first-order error that is pure
+        //  bookkeeping. main.tex already removes it in post-processing by
+        //  referencing each bin to t_j + dT/2; this does it at source, so
+        //  <time>/U_Bin is the average of the window CENTRED on <time>.
+        //
+        //  Implemented as a phase-origin shift of -dT/2 (see phaseOrigin_).
+        //  The cycle origin must shift with it: a bin centred on phase 0 spans
+        //  [-dT/2, +dT/2), straddling the cycle boundary, and its first half
+        //  would be discarded by the cycle reset. Shifting both keeps every bin
+        //  wholly inside one cycle. Bin LABELS are unaffected -- they stay on
+        //  the solver's write times.
+        bool binCentred_;
+
+        //- Phase/cycle origin actually used by phaseBin() and
+        //  currentCycleNumber(): startTime_ - dT/2 when binCentred_, else
+        //  startTime_. Kept separate so bin LABELS (which use startTime_)
+        //  remain on the write times.
+        scalar phaseOrigin_;
+
         //- "bin" mode: write the cross-cycle _BinPA* files only every Nth
         //  completed cycle. The per-cycle _Bin file is always written (it is
         //  what makes the output restart-safe at write granularity).
@@ -245,6 +285,14 @@ class BBPA
 
             //- Cycle in which straddledBin_ is contaminated (-1 = none).
             label straddledCycle_;
+
+            //- Has the straddle check been done for this run's start instant?
+            bool straddleChecked_;
+
+            //- The instant this run actually began (restart time, or the cold
+            //  start time). The straddle is a property of THAT instant, not of
+            //  whether a checkpoint happened to exist.
+            scalar runStartTime_;
 
         //- Bin item structure for each field (templated to preserve type)
         template<class Type>
@@ -460,6 +508,14 @@ class BBPA
         //  emitPA=false ("bin" mode with PAwriteInterval>1) writes only the
         //  per-cycle <field>_Bin and skips the cross-cycle _BinPA* files.
         void writeAllAveragedFields(const bool emitPA);
+
+        //- Flag the bin straddled by this run's start instant, if any.
+        //  Runs for BOTH a restart and a cold start: with binCentred, bin 0 of
+        //  the first cycle wants [-dT/2, +dT/2) but the run begins at
+        //  startTime, so half its window never existed -- exactly the same
+        //  partial-window-folded-as-a-whole-cycle defect as a mid-bin restart.
+        //  Must be called only after startTime_/phaseOrigin_ are final.
+        void flagStraddledBin();
 
         //- Restore checkpoint state on restart from disk.
         //  Reads <name>Properties (counters: startTime, currentCycle,
