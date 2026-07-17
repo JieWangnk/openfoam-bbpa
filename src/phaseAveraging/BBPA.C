@@ -567,13 +567,21 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                     "writeControl", word::null
                 );
 
-            if (wc != "runTime" || wi <= 0)
+            // Both runTime and adjustableRunTime write at fixed writeInterval
+            // spacing (adjustableRunTime just nudges the timestep to land on
+            // the write times exactly) -- either lets us know where the writes
+            // are. The aorta production runs use adjustableRunTime. clockTime /
+            // cpuTime / timeStep do NOT give a fixed time spacing and are
+            // rejected.
+            const bool fixedTimeWrites =
+                (wc == "runTime" || wc == "adjustableRunTime");
+            if (!fixedTimeWrites || wi <= 0)
             {
                 FatalErrorInFunction
-                    << "binsAtWriteTimes needs writeControl runTime with a "
-                    << "positive writeInterval to know where the write times "
-                    << "are (found writeControl " << wc << ", writeInterval "
-                    << wi << ")." << exit(FatalError);
+                    << "binsAtWriteTimes needs writeControl runTime or "
+                    << "adjustableRunTime with a positive writeInterval to know "
+                    << "where the write times are (found writeControl " << wc
+                    << ", writeInterval " << wi << ")." << exit(FatalError);
             }
 
             // A bin is labelled j*binDeltaT_ and coincides with a write time
@@ -648,7 +656,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         // sharpness). Testing all 100 bins there would warn about directories
         // that are never created.
         bool misaligned = false;
-        if (wi > 0 && wc == "runTime")
+        if (wi > 0 && (wc == "runTime" || wc == "adjustableRunTime"))
         {
             if (binsOfInterest_.empty())
             {
