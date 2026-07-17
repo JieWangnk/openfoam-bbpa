@@ -210,6 +210,41 @@ class BBPA
             //- Has the legacy (pre-fix) bin-window layout been probed for?
             bool legacyStart_probed_;
 
+        //- Straddled-bin guard.
+        //   A restart resumes at the last written time, which need not be a bin
+        //   boundary. The bin CONTAINING that instant then accumulates only the
+        //   part of its phase window that lies after the restart, yet
+        //   finalizeCycle() would fold it in as a COMPLETE cycle at full
+        //   weight: a partial-window mean, biased toward the phases that
+        //   happen to fall after the restart, averaged in as if it were the
+        //   whole bin. Nothing about the value looks wrong on disk.
+        //
+        //   Measured on tutorials/bbpaVerifyLES with a SIGKILL at t=3.54: with
+        //   nBins=25 (bin width 0.04) phase 0.54 falls at bin 13.5 -- mid-bin --
+        //   and the restarted run's matched bins differed from an identical
+        //   continuous run by 5e-4. With nBins=50 (bin width 0.02) the same
+        //   restart lands exactly on bin 27's edge, no bin is straddled, and the
+        //   matched bins agree to 1e-12. Only nBins changed.
+        //
+        //   This is EXACTLY detectable rather than a coverage heuristic: the bin
+        //   is straddled if and only if the restart phase lies strictly inside
+        //   it. Treat that one bin, for that one cycle, exactly as a bin that
+        //   received no data at all -- drop it. It loses one cycle and is
+        //   noisier, but it is UNBIASED, which is the same trade the
+        //   missing-checkpoint recovery already makes.
+        //
+        //   Note the two constraints this interacts with, which conflict:
+        //     co-location (bins land in solver write dirs): binWidth = k*writeInterval
+        //     restart safety (no straddle possible):        writeInterval = m*binWidth
+        //   Both hold only when binWidth == writeInterval (the aorta's I=50
+        //   config). This guard removes the need to rely on that alignment.
+
+            //- Bin straddled by the restart instant (-1 = none).
+            label straddledBin_;
+
+            //- Cycle in which straddledBin_ is contaminated (-1 = none).
+            label straddledCycle_;
+
         //- Bin item structure for each field (templated to preserve type)
         template<class Type>
         struct binItem
@@ -284,7 +319,11 @@ class BBPA
                 const FieldType& field,
                 const scalar dt
             );
-            void finalizeCycle();
+            //- Fold the completed cycle into the running mean.
+            //  skipBin (-1 = none) drops one bin for this cycle: used for the
+            //  bin straddled by a restart instant, whose window is only
+            //  partially covered and must not be weighted as a whole cycle.
+            void finalizeCycle(const label skipBin = -1);
 
             //- Write the phase-aligned bin outputs.
             //  paSuffix selects the naming: "_PA" (default/back-compat) or
@@ -343,8 +382,9 @@ class BBPA
         //- Reset all bins for new cycle
         void resetAllBinsForNewCycle();
 
-        //- Finalize all bin items for completed cycle
-        void finalizeAllForCycle();
+        //- Finalize all bin items for completed cycle.
+        //  skipBin (-1 = none) drops the restart-straddled bin.
+        void finalizeAllForCycle(const label skipBin = -1);
 
         //- Accumulate all fields for current time step
         void accumulateAllFields(const label binI, const scalar dt);

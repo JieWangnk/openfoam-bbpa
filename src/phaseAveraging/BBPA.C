@@ -167,15 +167,15 @@ void Foam::functionObjects::BBPA::resetAllBinsForNewCycle()
 }
 
 
-void Foam::functionObjects::BBPA::finalizeAllForCycle()
+void Foam::functionObjects::BBPA::finalizeAllForCycle(const label skipBin)
 {
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        iter()->finalizeCycle();
+        iter()->finalizeCycle(skipBin);
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        iter()->finalizeCycle();
+        iter()->finalizeCycle(skipBin);
     }
 }
 
@@ -308,6 +308,8 @@ Foam::functionObjects::BBPA::BBPA
     checkpointCycleStart_(0),
     restoredFields_(),
     legacyStart_probed_(false),
+    straddledBin_(-1),
+    straddledCycle_(-1),
     scalarBinItems_(),
     vectorBinItems_()
 {
@@ -382,22 +384,40 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         // side by side. This is a configuration smell, not an error: the mode
         // still works, it just creates directories of its own.
         //
+        // Bin times are k*binWidth; solver write times are m*writeInterval.
+        // The bins land in directories the solver already wrote iff every
+        // k*binWidth is some m*writeInterval, i.e. iff binWidth is an integer
+        // multiple of writeInterval -- NOT the other way round.
+        //
+        // Getting this backwards inverts the test exactly where it matters:
+        // period 0.5 with I=200 gives binWidth 0.0025 against a writeInterval
+        // of 0.01, so writeInterval/binWidth = 4 is a clean integer while the
+        // bins fall at 0.0025, 0.005, 0.0075 -- times the solver never writes.
+        // That is the very configuration this warning exists to catch.
+        //
         // NB: binDeltaT_ is not assigned until below, so use period_/nBins_.
         // Time has no public writeInterval() accessor, so read controlDict.
         const scalar binWidth = period_/nBins_;
         const scalar wi =
             time_.controlDict().lookupOrDefault<scalar>("writeInterval", -1);
-        if (wi > 0)
+        const word wc =
+            time_.controlDict().lookupOrDefault<word>("writeControl", word::null);
+
+        if (wi > 0 && wc == "runTime")
         {
-            const scalar ratio = wi/binWidth;
+            const scalar ratio = binWidth/wi;
             if (mag(ratio - std::round(ratio)) > 1e-6)
             {
                 WarningInFunction
-                    << "writeMode 'bin': the solver writeInterval (" << wi
-                    << ") is not an integer multiple of the bin width "
-                    << "period/nBins (" << binWidth << ")." << nl
-                    << "    The _Bin files will land in directories of their "
-                    << "own rather than beside the instantaneous fields."
+                    << "writeMode 'bin': the bin width period/nBins ("
+                    << binWidth << ") is not an integer multiple of the solver "
+                    << "writeInterval (" << wi << ")." << nl
+                    << "    The bins fall at times the solver does not write, "
+                    << "so the _Bin files will create directories of their own "
+                    << "rather than landing beside the instantaneous fields."
+                    << nl
+                    << "    For co-located output choose nBins so that "
+                    << "period/nBins is a multiple of " << wi << "."
                     << endl;
             }
         }
@@ -474,8 +494,28 @@ bool Foam::functionObjects::BBPA::execute()
     {
         if (previousCycle_ >= startCycle_)
         {
-            // Finalize the previous cycle (only if it was being averaged)
-            finalizeAllForCycle();
+            // Finalize the previous cycle (only if it was being averaged).
+            // If a restart landed mid-bin during THIS cycle, that one bin saw
+            // only part of its phase window and must not be folded in as a
+            // whole cycle -- drop it, exactly as a bin with no data is dropped.
+            const label skip =
+                (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
+
+            if (skip >= 0)
+            {
+                Info<< "    dropping restart-straddled bin " << skip
+                    << " from cycle " << previousCycle_
+                    << " (partial window)" << endl;
+            }
+
+            finalizeAllForCycle(skip);
+
+            // consumed: later cycles cover this bin fully again
+            if (skip >= 0)
+            {
+                straddledBin_ = -1;
+                straddledCycle_ = -1;
+            }
         }
 
         // Reset bins for new cycle
@@ -693,6 +733,54 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         startTime_ = propsDict.lookup<scalar>("startTime");
         currentCycle_ = propsDict.lookup<label>("currentCycle");
         previousCycle_ = propsDict.lookup<label>("previousCycle");
+
+        // Straddled-bin guard. The run resumes at the last WRITTEN time, which
+        // need not be a bin boundary. The bin containing that instant will now
+        // accumulate only the part of its phase window lying after the restart,
+        // and finalizeCycle() would fold that partial-window mean in as a
+        // complete cycle at full weight -- biased toward whichever phases
+        // happen to follow the restart, and indistinguishable from a healthy
+        // value on disk.
+        //
+        // Detect it exactly rather than by a coverage heuristic: the bin is
+        // straddled iff the restart phase lies STRICTLY INSIDE it. Landing
+        // exactly on a bin edge (the aorta's binWidth == writeInterval case)
+        // covers the bin fully and must not be dropped.
+        {
+            const scalar tRes = time_.value() - startTime_;
+            scalar phase = std::fmod(tRes, period_);
+            if (phase > period_*(1.0 - 1e-12)) phase = 0;
+
+            const label binI = min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+            const scalar binStart = binI*binDeltaT_;
+
+            // strictly inside => the earlier part of this bin's window is gone
+            if (phase - binStart > 1e-9*binDeltaT_)
+            {
+                straddledBin_ = binI;
+                straddledCycle_ = currentCycle_;
+
+                WarningInFunction
+                    << "Restart at t=" << time_.value() << " (phase "
+                    << phase << ") lands INSIDE bin " << binI
+                    << " [" << binStart << ", " << binStart + binDeltaT_
+                    << "): that bin's window is only partially covered in cycle "
+                    << currentCycle_ << "." << nl
+                    << "    Dropping bin " << binI << " for cycle "
+                    << currentCycle_ << " rather than folding a partial-window "
+                    << "mean in at full weight (unbiased, one cycle noisier)."
+                    << nl
+                    << "    To avoid this entirely, make the solver "
+                    << "writeInterval an integer multiple of period/nBins ("
+                    << binDeltaT_ << ") so restarts always land on a bin edge."
+                    << endl;
+            }
+            else
+            {
+                straddledBin_ = -1;
+                straddledCycle_ = -1;
+            }
+        }
 
         // Capture the checkpoint's cycle start so a late-registering field
         // is restored from the phase-aligned dirs the checkpoint actually

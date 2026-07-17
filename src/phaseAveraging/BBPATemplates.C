@@ -289,7 +289,10 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
 
 
 template<class Type>
-void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
+void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
+(
+    const label skipBin
+)
 {
     nCycles_++;
 
@@ -298,6 +301,29 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle()
     {
         // Skip bins not allocated in sparse-bin mode (also have time==0).
         if (!currentCycleBinSum_.set(binI)) continue;
+
+        // Restart-straddled bin: a restart resumed at an instant strictly
+        // inside this bin's phase window, so the cycle covered only the part
+        // of the window lying after that instant. Its mean is a partial-window
+        // mean, biased toward whichever phases happen to follow the restart,
+        // and folding it at full weight would carry that bias into the phase
+        // average -- while looking entirely healthy on disk.
+        //
+        // Drop it exactly as a bin that received no data at all is dropped:
+        // binCounts_ is not incremented, so no cycle is ever credited without
+        // the data to back it. One cycle noisier, but UNBIASED -- the same
+        // trade the missing-checkpoint recovery makes.
+        //
+        // lastCycleBinTime_ is zeroed too, so "bin" mode does not emit a
+        // <field>_Bin file built from the partial window either.
+        if (binI == skipBin)
+        {
+            if (lastCycleFields_.size())
+            {
+                lastCycleBinTime_[binI] = 0;
+            }
+            continue;
+        }
 
         // "bin" mode: capture THIS cycle's bin before it is folded into the
         // running mean and the accumulators are reset. write() runs after
