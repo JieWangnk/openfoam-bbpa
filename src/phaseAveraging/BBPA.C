@@ -1127,8 +1127,29 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         if (propsDict.found(fname))
         {
             const dictionary& fd = propsDict.subDict(fname);
+            // Guard against a checkpoint from a run with a DIFFERENT nBins.
+            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // to the checkpoint's size, after which every downstream loop over
+            // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
+            // free(): invalid pointer crash. Reject a mismatched checkpoint and
+            // cold-start this field instead (the usual cause is a stale
+            // <name>Properties left in the start-time dir after nBins changed;
+            // clean it, or this is exactly the right thing to do).
+            const scalarField loadedCounts(fd.lookup<scalarField>("binCounts"));
+            if (loadedCounts.size() != nBins_)
+            {
+                WarningInFunction
+                    << "checkpoint for field " << fname << " has "
+                    << loadedCounts.size() << " bins but nBins is " << nBins_
+                    << " -- ignoring this checkpoint and cold-starting the field"
+                    << " (a stale " << name() << "Properties from a run with a"
+                    << " different nBins? remove it from the start-time dir)."
+                    << endl;
+                restoredFields_.insert(fname);
+                continue;
+            }
             iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+            iter()->binCounts_ = loadedCounts;
             restoreBinItemFromDisk
             (
                 *(iter()), fname, cycleStart,
@@ -1177,8 +1198,29 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         if (propsDict.found(fname))
         {
             const dictionary& fd = propsDict.subDict(fname);
+            // Guard against a checkpoint from a run with a DIFFERENT nBins.
+            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // to the checkpoint's size, after which every downstream loop over
+            // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
+            // free(): invalid pointer crash. Reject a mismatched checkpoint and
+            // cold-start this field instead (the usual cause is a stale
+            // <name>Properties left in the start-time dir after nBins changed;
+            // clean it, or this is exactly the right thing to do).
+            const scalarField loadedCounts(fd.lookup<scalarField>("binCounts"));
+            if (loadedCounts.size() != nBins_)
+            {
+                WarningInFunction
+                    << "checkpoint for field " << fname << " has "
+                    << loadedCounts.size() << " bins but nBins is " << nBins_
+                    << " -- ignoring this checkpoint and cold-starting the field"
+                    << " (a stale " << name() << "Properties from a run with a"
+                    << " different nBins? remove it from the start-time dir)."
+                    << endl;
+                restoredFields_.insert(fname);
+                continue;
+            }
             iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = fd.lookup<scalarField>("binCounts");
+            iter()->binCounts_ = loadedCounts;
             restoreBinItemFromDisk
             (
                 *(iter()), fname, cycleStart,
