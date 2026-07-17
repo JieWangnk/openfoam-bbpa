@@ -255,7 +255,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
     const scalar cycleStartTime,
     const scalar binDeltaT,
     const scalar now,
-    const label skipBin
+    const label skipBin,
+    const scalar centreOffset
 )
 {
     if (binFlushed_.empty()) return;
@@ -271,7 +272,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
         // Writing earlier would persist a partial window that a restart would
         // then restore as if it were whole -- the very bug the straddle guard
         // exists to prevent.
-        const scalar binEnd = cycleStartTime + (binI + 1)*binDeltaT;
+        const scalar binEnd =
+            cycleStartTime + (binI + 1)*binDeltaT - centreOffset;
         if (now < binEnd - 1e-9*binDeltaT) continue;
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;
@@ -325,7 +327,8 @@ Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
     const fvMesh& mesh,
     const scalar cycleStartTime,
     const scalar binDeltaT,
-    const scalar now
+    const scalar now,
+    const scalar centreOffset
 )
 {
     if (binFlushed_.empty()) return 0;
@@ -340,7 +343,8 @@ Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
         // can have been written whole. The bin CONTAINING the restart instant
         // is partial by definition and must not be recovered -- the straddle
         // guard drops it instead.
-        const scalar binEnd = cycleStartTime + (binI + 1)*binDeltaT;
+        const scalar binEnd =
+            cycleStartTime + (binI + 1)*binDeltaT - centreOffset;
         if (now < binEnd - 1e-9*binDeltaT) continue;
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;

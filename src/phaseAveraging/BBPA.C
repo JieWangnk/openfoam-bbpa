@@ -221,6 +221,7 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
     // delete live bin data in an earlier version.
     const scalar cycleStart = startTime_ + cycle*period_;
     const scalar now = time_.value();
+    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
 
     // Never persist the bin a restart landed inside: it covers only part of its
     // window this cycle, and a file written from it would be recovered later as
@@ -229,11 +230,17 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins(time_, cycleStart, binDeltaT_, now, skip);
+        iter()->writeCurrentCycleBins
+        (
+            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+        );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins(time_, cycleStart, binDeltaT_, now, skip);
+        iter()->writeCurrentCycleBins
+        (
+            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+        );
     }
 }
 
@@ -242,20 +249,21 @@ Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
 {
     const scalar cycleStart = startTime_ + currentCycle_*period_;
     const scalar now = time_.value();
+    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
     label n = 0;
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
         n += iter()->restoreCurrentCycleBins
         (
-            mesh_, cycleStart, binDeltaT_, now
+            mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
         n += iter()->restoreCurrentCycleBins
         (
-            mesh_, cycleStart, binDeltaT_, now
+            mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
 
@@ -416,6 +424,9 @@ Foam::functionObjects::BBPA::BBPA
     countersRestored_(false),
     checkpointCycleStart_(0),
     restoredFields_(),
+    inProgressCycleStart_(0),
+    inProgressNow_(0),
+    inProgressCaptured_(false),
     legacyStart_probed_(false),
     straddledBin_(-1),
     straddledCycle_(-1),
@@ -1031,24 +1042,16 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         }
         countersRestored_ = true;
 
-        // Recover the in-progress cycle's completed bins, written as each bin
-        // closed. Without this the whole partial cycle is discarded even though
-        // every completed bin of it is sitting on disk. Runs AFTER the counters
-        // are restored (it needs currentCycle_ to locate the window) and only
-        // covers bins whose window closed strictly before the restart instant;
-        // the bin containing the restart is partial and is dropped by the
-        // straddle guard instead.
-        if (binNaming_)
-        {
-            const label nrec = restoreCurrentCycle();
-            if (nrec > 0)
-            {
-                Info<< "    recovered " << nrec
-                    << " completed bin(s) of the in-progress cycle "
-                    << currentCycle_ << " from <field>_Bin on disk"
-                    << " (partial cycle preserved across the restart)" << endl;
-            }
-        }
+        // Capture the restart instant. The in-progress cycle recovery itself
+        // is done PER FIELD in the loops below (guarded by restoredFields_),
+        // so a late-registering derived field (wallShearStress) recovers its
+        // partial cycle against this SAME instant -- not against the later time
+        // it happens to register, and not skipped entirely (the bug: the
+        // recovery used to run once here, for U only, so WSS lost a whole cycle
+        // on every bin whose window had closed before the restart).
+        inProgressCycleStart_ = startTime_ + currentCycle_*period_;
+        inProgressNow_ = time_.value();
+        inProgressCaptured_ = true;
     }
 
     // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
@@ -1093,6 +1096,27 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
 
+            // Recover THIS field's in-progress cycle (the completed bins of the
+            // partial cycle, written as each bin closed). Per-field and guarded
+            // by restoredFields_, so it runs exactly once per field -- including
+            // a late-registering derived field -- and never re-clobbers a field
+            // that has already accumulated new steps since the restart.
+            if (binNaming_ && inProgressCaptured_)
+            {
+                const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+                const label nrec = iter()->restoreCurrentCycleBins
+                (
+                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                );
+                if (nrec > 0)
+                {
+                    Info<< "    " << fname << ": recovered " << nrec
+                        << " completed bin(s) of the in-progress cycle "
+                        << currentCycle_ << " from " << fname
+                        << "_Bin on disk" << endl;
+                }
+            }
+
             Info<< "    Restored field " << fname
                 << ": nCycles=" << iter()->nCycles_ << endl;
         }
@@ -1121,6 +1145,27 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 *(iter()), fname, cycleStart,
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
+
+            // Recover THIS field's in-progress cycle (the completed bins of the
+            // partial cycle, written as each bin closed). Per-field and guarded
+            // by restoredFields_, so it runs exactly once per field -- including
+            // a late-registering derived field -- and never re-clobbers a field
+            // that has already accumulated new steps since the restart.
+            if (binNaming_ && inProgressCaptured_)
+            {
+                const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+                const label nrec = iter()->restoreCurrentCycleBins
+                (
+                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                );
+                if (nrec > 0)
+                {
+                    Info<< "    " << fname << ": recovered " << nrec
+                        << " completed bin(s) of the in-progress cycle "
+                        << currentCycle_ << " from " << fname
+                        << "_Bin on disk" << endl;
+                }
+            }
 
             Info<< "    Restored field " << fname
                 << ": nCycles=" << iter()->nCycles_ << endl;

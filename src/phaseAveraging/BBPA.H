@@ -248,6 +248,14 @@ class BBPA
             //- Fields whose checkpoint state has been restored.
             HashSet<word> restoredFields_;
 
+            //- Restart instant, captured at the FIRST readCheckpoint so a
+            //  late-registering field (e.g. wallShearStress) recovers its
+            //  in-progress cycle against the SAME instant U did, not against
+            //  the later time at which it happens to register.
+            scalar inProgressCycleStart_;
+            scalar inProgressNow_;
+            bool   inProgressCaptured_;
+
             //- Has the legacy (pre-fix) bin-window layout been probed for?
             bool legacyStart_probed_;
 
@@ -440,13 +448,17 @@ class BBPA
             //  would put a partial-window mean on disk under the name of a
             //  complete bin -- which a later restart would then recover AS
             //  complete. The straddled bin is dropped, not written.
+            //  centreOffset (0 or binDeltaT/2) shifts the window-closed test
+            //  to the CENTRED window end when binCentred is active, so a bin
+            //  whose centred window closes at 'now' is treated as complete.
             void writeCurrentCycleBins
             (
                 const Time& time,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,
                 const scalar now,
-                const label skipBin
+                const label skipBin,
+                const scalar centreOffset
             );
 
             //- "bin" mode: restore the in-progress cycle's completed bins from
@@ -458,7 +470,8 @@ class BBPA
                 const fvMesh& mesh,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,
-                const scalar now
+                const scalar now,
+                const scalar centreOffset
             );
         };
 
