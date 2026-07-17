@@ -47,6 +47,7 @@ Description
 #include "HashSet.H"
 #include "fileName.H"
 #include "scalarField.H"
+#include "boolList.H"
 #include "PtrList.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
@@ -296,6 +297,22 @@ class BBPA
             //  Zero means that bin received no data in that cycle.
             scalarField lastCycleBinTime_;
 
+            //- "bin" mode: bins of the CURRENT cycle already flushed to disk as
+            //  <field>_Bin / <field>_Bin_UU. Reset every cycle.
+            //
+            //  Writing each bin the moment its phase window closes -- rather
+            //  than batching all of them at the cycle boundary -- is what makes
+            //  the output restart-safe at WRITE granularity instead of CYCLE
+            //  granularity. Measured on tutorials/bbpaVerifyLES: a SIGKILL at
+            //  t=3.602 threw away cycle 3's bins 0-13 even though every one of
+            //  them was complete and sitting in memory, purely because nothing
+            //  had persisted them yet -- 15 of 25 bins lost a cycle. With the
+            //  incremental flush the same kill costs only the straddled bin.
+            //
+            //  It is close to free: the same one file per bin per cycle, just
+            //  written as the bin closes instead of all at once afterwards.
+            boolList binFlushed_;
+
             //- Construct. activeBins lists the bin indices that should
             //  allocate field-sized accumulators; an EMPTY list means
             //  "all nBins bins" (original behaviour). Non-active bins
@@ -354,6 +371,47 @@ class BBPA
                 const Time& time,
                 const label currentBinIndex
             ) const;
+
+            //- "bin" mode: flush every bin of the CURRENT cycle whose phase
+            //  window has closed at or before 'now' and that has not been
+            //  written yet, as <field>_Bin and <field>_Bin_UU in the bin's own
+            //  phase-aligned directory.
+            //
+            //  Both files are needed, not just the mean: the restore
+            //  reconstructs currentCycleBinSum_ AND currentCycleBinSqrSum_ from
+            //  them. Restoring the mean alone would leave the second-moment
+            //  accumulator at zero while its bin time said "full", and
+            //  finalizeCycle() would then fold a genuine zero into <UiUj> --
+            //  silently destroying the Reynolds stress for that bin.
+            //
+            //  Only bins strictly BEHIND the solver clock are written, so no
+            //  directory is ever stamped ahead of the run (the failure that
+            //  made restart cleanup delete live bin data).
+            //  skipBin (-1 = none) suppresses the restart-straddled bin: it
+            //  covers only part of its window this cycle, so persisting it
+            //  would put a partial-window mean on disk under the name of a
+            //  complete bin -- which a later restart would then recover AS
+            //  complete. The straddled bin is dropped, not written.
+            void writeCurrentCycleBins
+            (
+                const Time& time,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const scalar now,
+                const label skipBin
+            );
+
+            //- "bin" mode: restore the in-progress cycle's completed bins from
+            //  the <field>_Bin / <field>_Bin_UU written before a kill, so a
+            //  restart resumes mid-cycle instead of discarding it.
+            //  Returns the number of bins recovered.
+            label restoreCurrentCycleBins
+            (
+                const fvMesh& mesh,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const scalar now
+            );
         };
 
         //- Hash tables of bin items for different field types.
@@ -388,6 +446,15 @@ class BBPA
 
         //- Accumulate all fields for current time step
         void accumulateAllFields(const label binI, const scalar dt);
+
+        //- "bin" mode: flush the CURRENT cycle's newly-closed bins to disk,
+        //  so a kill loses at most the bin it lands in rather than the whole
+        //  in-progress cycle.
+        void flushCurrentCycleBins(const label cycle);
+
+        //- "bin" mode: recover the in-progress cycle's completed bins written
+        //  before a kill. Returns bins recovered.
+        label restoreCurrentCycle();
 
         //- Write all phase-averaged fields (Strategy B: I dirs).
         //  emitPA=false ("bin" mode with PAwriteInterval>1) writes only the

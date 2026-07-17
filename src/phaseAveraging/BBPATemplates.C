@@ -121,7 +121,8 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     meanSqrFields_(nBins),
     currentCycleBinSqrSum_(nBins),
     lastCycleFields_(keepLastCycle ? nBins : 0),
-    lastCycleBinTime_(keepLastCycle ? nBins : 0, 0.0)
+    lastCycleBinTime_(keepLastCycle ? nBins : 0, 0.0),
+    binFlushed_(keepLastCycle ? nBins : 0, false)
 {
     // Look up field to get dimensions
     const FieldType& field = mesh.lookupObject<FieldType>(name);
@@ -248,8 +249,157 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
 
 
 template<class Type>
+void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
+(
+    const Time& time,
+    const scalar cycleStartTime,
+    const scalar binDeltaT,
+    const scalar now,
+    const label skipBin
+)
+{
+    if (binFlushed_.empty()) return;
+
+    forAll(currentCycleBinSum_, binI)
+    {
+        if (!currentCycleBinSum_.set(binI)) continue;   // sparse-bin mode
+        if (binI == skipBin) continue;                  // restart-straddled
+        if (binFlushed_[binI]) continue;                // already on disk
+        if (currentCycleBinTime_[binI] <= 0) continue;  // no data yet
+
+        // The bin is complete only once the solver has passed its UPPER edge.
+        // Writing earlier would persist a partial window that a restart would
+        // then restore as if it were whole -- the very bug the straddle guard
+        // exists to prevent.
+        const scalar binEnd = cycleStartTime + (binI + 1)*binDeltaT;
+        if (now < binEnd - 1e-9*binDeltaT) continue;
+
+        const scalar binTime = cycleStartTime + binI*binDeltaT;
+        const word binTimeName = Time::timeName(binTime);
+        const fvMesh& mesh = currentCycleBinSum_[binI].mesh();
+        const scalar inv = 1.0/currentCycleBinTime_[binI];
+
+        FieldType binField
+        (
+            IOobject
+            (
+                fieldName_ + "_Bin",
+                binTimeName,
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE,
+                false
+            ),
+            currentCycleBinSum_[binI]*inv
+        );
+        writePAField(binField, mesh, binTimeName);
+
+        // The per-cycle second moment must be persisted too: the restore
+        // rebuilds currentCycleBinSqrSum_ from it. Without it a recovered bin
+        // would carry a full bin time but a zero second moment, and
+        // finalizeCycle() would fold that zero into <UiUj> as real data.
+        SqrFieldType binUU
+        (
+            IOobject
+            (
+                fieldName_ + "_Bin_UU",
+                binTimeName,
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE,
+                false
+            ),
+            currentCycleBinSqrSum_[binI]*inv
+        );
+        writePAField(binUU, mesh, binTimeName);
+
+        binFlushed_[binI] = true;
+    }
+}
+
+
+template<class Type>
+Foam::label
+Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
+(
+    const fvMesh& mesh,
+    const scalar cycleStartTime,
+    const scalar binDeltaT,
+    const scalar now
+)
+{
+    if (binFlushed_.empty()) return 0;
+
+    label recovered = 0;
+
+    forAll(currentCycleBinSum_, binI)
+    {
+        if (!currentCycleBinSum_.set(binI)) continue;
+
+        // Only bins whose window closed strictly before the restart instant
+        // can have been written whole. The bin CONTAINING the restart instant
+        // is partial by definition and must not be recovered -- the straddle
+        // guard drops it instead.
+        const scalar binEnd = cycleStartTime + (binI + 1)*binDeltaT;
+        if (now < binEnd - 1e-9*binDeltaT) continue;
+
+        const scalar binTime = cycleStartTime + binI*binDeltaT;
+        const word binTimeName = Time::timeName(binTime);
+
+        const fileName binPath =
+            mesh.time().path()/binTimeName/(fieldName_ + "_Bin");
+        const fileName uuPath =
+            mesh.time().path()/binTimeName/(fieldName_ + "_Bin_UU");
+
+        // Both files or neither: a bin recovered with a mean but no second
+        // moment would fold a zero <UiUj> in at full weight.
+        if (!Foam::isFile(binPath) || !Foam::isFile(uuPath)) continue;
+
+        FieldType loaded
+        (
+            IOobject
+            (
+                fieldName_ + "_Bin",
+                binTimeName,
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE,
+                false
+            ),
+            mesh
+        );
+
+        SqrFieldType loadedUU
+        (
+            IOobject
+            (
+                fieldName_ + "_Bin_UU",
+                binTimeName,
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE,
+                false
+            ),
+            mesh
+        );
+
+        // The files hold the bin MEANS; the accumulators hold time-weighted
+        // SUMS. The bin is complete, so its weight is exactly binDeltaT.
+        currentCycleBinSum_[binI] = loaded*binDeltaT;
+        currentCycleBinSqrSum_[binI] = loadedUU*binDeltaT;
+        currentCycleBinTime_[binI] = binDeltaT;
+        binFlushed_[binI] = true;      // already on disk; do not rewrite
+        recovered++;
+    }
+
+    return recovered;
+}
+
+
+template<class Type>
 void Foam::functionObjects::BBPA::binItem<Type>::resetCurrentCycle()
 {
+    binFlushed_ = false;
     currentCycleBinTime_ = 0.0;
 
     forAll(currentCycleBinSum_, binI)

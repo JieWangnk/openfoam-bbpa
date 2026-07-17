@@ -204,6 +204,56 @@ void Foam::functionObjects::BBPA::accumulateAllFields
 }
 
 
+void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
+{
+    // The in-progress cycle's window. Only bins whose upper edge the solver has
+    // already passed are written, so every directory touched is at or behind
+    // the solver clock -- never ahead of it, which is what made restart cleanup
+    // delete live bin data in an earlier version.
+    const scalar cycleStart = startTime_ + cycle*period_;
+    const scalar now = time_.value();
+
+    // Never persist the bin a restart landed inside: it covers only part of its
+    // window this cycle, and a file written from it would be recovered later as
+    // a complete bin.
+    const label skip = (cycle == straddledCycle_) ? straddledBin_ : -1;
+
+    forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
+    {
+        iter()->writeCurrentCycleBins(time_, cycleStart, binDeltaT_, now, skip);
+    }
+    forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
+    {
+        iter()->writeCurrentCycleBins(time_, cycleStart, binDeltaT_, now, skip);
+    }
+}
+
+
+Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
+{
+    const scalar cycleStart = startTime_ + currentCycle_*period_;
+    const scalar now = time_.value();
+    label n = 0;
+
+    forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
+    {
+        n += iter()->restoreCurrentCycleBins
+        (
+            mesh_, cycleStart, binDeltaT_, now
+        );
+    }
+    forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
+    {
+        n += iter()->restoreCurrentCycleBins
+        (
+            mesh_, cycleStart, binDeltaT_, now
+        );
+    }
+
+    return n;
+}
+
+
 void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
 {
     // Phase-aligned time directories for the cycle the accumulator actually
@@ -494,6 +544,15 @@ bool Foam::functionObjects::BBPA::execute()
     {
         if (previousCycle_ >= startCycle_)
         {
+            // The completing cycle's LAST bin closes exactly at this boundary,
+            // so it has never been flushed by a write() call inside the cycle.
+            // Persist it before resetAllBinsForNewCycle() wipes the
+            // accumulator, or its _Bin_UU would never be written at all.
+            if (binNaming_)
+            {
+                flushCurrentCycleBins(previousCycle_);
+            }
+
             // Finalize the previous cycle (only if it was being averaged).
             // If a restart landed mid-bin during THIS cycle, that one bin saw
             // only part of its phase window and must not be folded in as a
@@ -551,6 +610,16 @@ bool Foam::functionObjects::BBPA::write()
 
     const bool isLastWrite =
         (time_.value() + 0.5*time_.deltaT().value() >= time_.endTime().value());
+
+    // "bin" mode: persist the CURRENT cycle's newly-closed bins before
+    // anything else. This is what makes the output restart-safe at write
+    // granularity: a kill then loses only the bin it lands in, instead of the
+    // entire in-progress cycle (measured: 15 of 25 bins lost to a SIGKILL
+    // before this, 1 after).
+    if (binNaming_)
+    {
+        flushCurrentCycleBins(currentCycle_);
+    }
 
     if (writeMode_ == "companion")
     {
@@ -819,6 +888,25 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
         }
         countersRestored_ = true;
+
+        // Recover the in-progress cycle's completed bins, written as each bin
+        // closed. Without this the whole partial cycle is discarded even though
+        // every completed bin of it is sitting on disk. Runs AFTER the counters
+        // are restored (it needs currentCycle_ to locate the window) and only
+        // covers bins whose window closed strictly before the restart instant;
+        // the bin containing the restart is partial and is dropped by the
+        // straddle guard instead.
+        if (binNaming_)
+        {
+            const label nrec = restoreCurrentCycle();
+            if (nrec > 0)
+            {
+                Info<< "    recovered " << nrec
+                    << " completed bin(s) of the in-progress cycle "
+                    << currentCycle_ << " from <field>_Bin on disk"
+                    << " (partial cycle preserved across the restart)" << endl;
+            }
+        }
     }
 
     // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
