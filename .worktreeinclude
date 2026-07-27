@@ -1,0 +1,3 @@
+# Gitignored files COPIED into each new git worktree (by the `ccwt` helper and,
+# on the desktop app, natively). gitignore-style globs; only gitignored matches copied.
+.claude/
