@@ -306,9 +306,12 @@ class BBPA
         template<class Type>
         struct binItem
         {
-            typedef GeometricField<Type, fvPatchField, volMesh> FieldType;
+            // OF14: GeometricField template params reordered
+            // <Type, PatchField, GeoMesh> -> <Type, GeoMesh, PrimitiveField>.
+            // VolField<Type> (volFieldsFwd.H) == GeometricField<Type, fvMesh, Field>.
+            typedef VolField<Type> FieldType;
             typedef typename bbpaSqrTypeOf<Type>::type SqrType;
-            typedef GeometricField<SqrType, fvPatchField, volMesh> SqrFieldType;
+            typedef VolField<SqrType> SqrFieldType;
 
             word fieldName_;
             label nCycles_;

@@ -96,8 +96,9 @@ class IPA
         template<class Type>
         struct phaseItem
         {
-            typedef GeometricField<Type, fvPatchField, volMesh> FieldType;
-            
+            // OF14: GeometricField params reordered; VolField<Type> == the volField.
+            typedef VolField<Type> FieldType;
+
             word fieldName_;
             label nCycles_;
             
