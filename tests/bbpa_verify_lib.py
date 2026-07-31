@@ -132,9 +132,25 @@ def coded_fo(kind, logpath, cstep=None):
             const Foam::scalar t0 = 0.0;
             const Foam::scalar dtbin = T/Foam::scalar(I);
             const Foam::scalar tt = t - t0;
-            const Foam::scalar phase = std::fmod(tt, T);
-            Foam::label binI = Foam::min(Foam::label(phase/dtbin), I-1);
-            Foam::label cyc  = Foam::label(tt/T);
+            Foam::scalar phase = std::fmod(tt, T);
+            // Mirror BBPA.C exactly: wrap an fmod result of period-1ulp back
+            // to phase 0, and floor with the bbpaSnapFloor snap-up (1e-9 in
+            // bin units). Plain truncation here would prescribe the LOWER
+            // bin's value near a drifted edge while the library assigns the
+            // step to the upper bin, breaking the bin-constant field's
+            // straddle immunity.
+            if (phase > T*(1.0 - 1e-12)) phase = 0.0;
+            const Foam::scalar bArg = phase/dtbin;
+            const Foam::scalar bFlr = std::floor(bArg);
+            Foam::label binI = Foam::min
+            (
+                Foam::label((bArg - bFlr) > (1.0 - 1e-9) ? bFlr + 1.0 : bFlr),
+                I-1
+            );
+            const Foam::scalar cArg = tt/T;
+            const Foam::scalar cFlr = std::floor(cArg);
+            Foam::label cyc =
+                Foam::label((cArg - cFlr) > (1.0 - 1e-9) ? cFlr + 1.0 : cFlr);
 
             static const Foam::scalar Ax[{I}] = {{ {Ax} }};
             static const Foam::scalar Ay[{I}] = {{ {Ay} }};
@@ -185,7 +201,7 @@ def bbpa_fo(extra=""):
 
 
 def control_dict(kind, dt, end_time, write_interval, start_from, logpath,
-                 start_time=0.0, cstep=None, bbpa_extra=""):
+                 start_time=0.0, cstep=None, bbpa_extra="", extra_fo=""):
     return f"""/*--------------------------------*- C++ -*----------------------------------*/
 FoamFile
 {{
@@ -220,6 +236,7 @@ functions
 {{
 {coded_fo(kind, logpath, cstep)}
 {bbpa_fo(bbpa_extra)}
+{extra_fo}
 }}
 
 // ************************************************************************* //
@@ -236,7 +253,7 @@ def sh(cmd, cwd):
 
 
 def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
-              cstep=None, bbpa_extra=""):
+              cstep=None, bbpa_extra="", extra_fo=""):
     rundir = os.path.join(RUNROOT, name)
     if os.path.exists(rundir):
         shutil.rmtree(rundir)
@@ -246,7 +263,8 @@ def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
         os.remove(logpath)
     with open(os.path.join(rundir, "system", "controlDict"), "w") as f:
         f.write(control_dict(kind, dt, end_time, write_interval, start_from,
-                             logpath, cstep=cstep, bbpa_extra=bbpa_extra))
+                             logpath, cstep=cstep, bbpa_extra=bbpa_extra,
+                             extra_fo=extra_fo))
     return rundir, logpath
 
 

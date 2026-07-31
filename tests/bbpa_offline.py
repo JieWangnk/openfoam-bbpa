@@ -54,19 +54,31 @@ import numpy as np
 
 
 # --------------------------------------------------------------------------- #
-#  Bin / cycle index maps -- replicate the integer truncation EXACTLY.
-#  Foam::label(x) truncates toward zero; for the non-negative arguments here
-#  that is floor().  We use int(math.floor(...)) but guard the boundary with a
-#  tiny replication of fmod's behaviour (numpy/C fmod agree for these inputs).
+#  Bin / cycle index maps -- replicate BBPA.C's snapped floor EXACTLY.
+#  The library (BBPA.C bbpaSnapFloor + phaseBin) floors with a snap-up when the
+#  argument sits within 1e-9 (bin units) below an integer, and wraps an fmod
+#  result of period-1ulp back to phase 0: an accumulated solver clock like
+#  fmod(2.9, 1.0) = 0.8999999999999999 would otherwise truncate one bin low
+#  (documented in BBPA.C:55-72).  Plain int() truncation here diverges from the
+#  compiled object on any non-representable dt (e.g. 0.05).
 # --------------------------------------------------------------------------- #
+def snap_floor(x):
+    """Foam bbpaSnapFloor: floor, snapping up within 1e-9 below an integer."""
+    r = math.floor(x)
+    return int(r + 1.0) if (x - r) > (1.0 - 1e-9) else int(r)
+
+
 def phase_bin(t, start_time, period, n_bins):
     bin_dt = period / n_bins
     phase = math.fmod(t - start_time, period)
-    return min(int(phase / bin_dt), n_bins - 1)
+    # fmod can return period-1ulp instead of 0 for an on-grid time (BBPA.C:83-85)
+    if phase > period * (1.0 - 1e-12):
+        phase = 0.0
+    return min(snap_floor(phase / bin_dt), n_bins - 1)
 
 
 def cycle_number(t, start_time, period):
-    return int((t - start_time) / period)
+    return snap_floor((t - start_time) / period)
 
 
 def magsqr_vec(v):
@@ -110,6 +122,12 @@ class BBPAReplica:
         self.previousCycle = -1
         self.currentCycle = 0
         self.currentBin = -1
+        # per-finalised-cycle record of the bin weights W_{c,j} (a copy of
+        # binTime at each finalizeCycle), for the weight-conservation checks:
+        # sum_j W_{c,j} == T holds exactly only when steps never straddle a
+        # cycle boundary (v1 assigns a whole step to the bin/cycle containing
+        # its END time; the v2 split rule will restore exact conservation).
+        self.cycleWeightHist = []
 
     # -- per-step accumulate (binItem::accumulate) ------------------------- #
     def _accumulate(self, binI, U, dt):
@@ -126,6 +144,7 @@ class BBPAReplica:
 
     # -- finalize previous cycle (binItem::finalizeCycle) ------------------ #
     def _finalize_cycle(self):
+        self.cycleWeightHist.append(self.binTime.copy())
         self.nCycles += 1
         for j in range(self.n_bins):
             if self.binTime[j] > 0:
