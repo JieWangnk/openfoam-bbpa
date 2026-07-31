@@ -282,15 +282,26 @@ bool Foam::functionObjects::IPA::read(const dictionary& dict)
     nPhases_ = dict.lookupOrDefault("nPhases", 50);
     startCycle_ = dict.lookupOrDefault("startCycle", 0);
     phaseTolerance_ = dict.lookupOrDefault("phaseTolerance", 0.01);
-    
+
+    // Optional phase origin override.  If set, IPA target phases are
+    //   phi_i = startTime + i * (period / nPhases).
+    // Default behaviour (no override) sets startTime_ to the runTime
+    // value at construction.  Override is used to align IPA samples
+    // with BBPA bin centres (set startTime to half a bin width).
+    if (dict.found("startTime"))
+    {
+        startTime_ = dict.lookup<scalar>("startTime");
+    }
+
     phaseInterval_ = period_ / scalar(nPhases_);
-    
+
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
         << "    Number of phase points: " << nPhases_ << nl
         << "    Phase interval: " << phaseInterval_ << " s" << nl
         << "    Phase tolerance: " << phaseTolerance_ << " s" << nl
         << "    Start cycle: " << startCycle_ << nl
+        << "    Phase origin (startTime): " << startTime_ << " s" << nl
         << "    Fields: " << fieldNames_ << endl;
     
     return true;
