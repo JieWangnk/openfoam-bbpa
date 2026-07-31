@@ -859,22 +859,20 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
         meanFields_[binI]
     );
 
-    if (hasCrossData && hasCurrentData)
+    // The mean over the COMPLETE cycles only -- the same no-blend rule as the
+    // phase-aligned write() above, for the same reason: the in-progress bin is
+    // PARTIAL (often a single timestep) yet the old
+    //     (meanFields_*nOld + currentCycleBinSum_/currentCycleBinTime_)
+    //         / (nOld + 1)
+    // blend weighted it as a whole cycle. Removing it here makes the companion
+    // output numerically identical to every other writeMode -- the output
+    // layout must never change the numbers. Only when no complete cycle exists
+    // yet is there nothing to report but the running partial. Whole-field
+    // assignment (not primitiveFieldRef) so the boundary is written too.
+    if (!hasCrossData)
     {
         const scalar inv = 1.0 / currentCycleBinTime_[binI];
-        const scalar nOld = binCounts_[binI];
-        const scalar total = nOld + 1.0;
-        paField.primitiveFieldRef() =
-            (
-                meanFields_[binI].primitiveField() * nOld
-              + currentCycleBinSum_[binI].primitiveField() * inv
-            ) / total;
-    }
-    else if (!hasCrossData)
-    {
-        const scalar inv = 1.0 / currentCycleBinTime_[binI];
-        paField.primitiveFieldRef() =
-            currentCycleBinSum_[binI].primitiveField() * inv;
+        paField = currentCycleBinSum_[binI] * inv;
     }
 
     mkDir(paField.objectPath().path());

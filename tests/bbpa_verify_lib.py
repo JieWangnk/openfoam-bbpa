@@ -163,7 +163,9 @@ def coded_fo(kind, logpath, cstep=None):
 """
 
 
-def bbpa_fo():
+def bbpa_fo(extra=""):
+    """The BBPA FO dict.  `extra` appends raw dict lines (e.g.
+    'writeMode bin;\\n        PAwriteInterval 2;') for option-matrix tests."""
     return f"""
     bbpa
     {{
@@ -177,12 +179,13 @@ def bbpa_fo():
         executeControl  timeStep;
         executeInterval 1;
         writeControl    writeTime;
+        {extra}
     }}
 """
 
 
 def control_dict(kind, dt, end_time, write_interval, start_from, logpath,
-                 start_time=0.0, cstep=None):
+                 start_time=0.0, cstep=None, bbpa_extra=""):
     return f"""/*--------------------------------*- C++ -*----------------------------------*/
 FoamFile
 {{
@@ -216,7 +219,7 @@ adjustTimeStep  no;
 functions
 {{
 {coded_fo(kind, logpath, cstep)}
-{bbpa_fo()}
+{bbpa_fo(bbpa_extra)}
 }}
 
 // ************************************************************************* //
@@ -233,7 +236,7 @@ def sh(cmd, cwd):
 
 
 def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
-              cstep=None):
+              cstep=None, bbpa_extra=""):
     rundir = os.path.join(RUNROOT, name)
     if os.path.exists(rundir):
         shutil.rmtree(rundir)
@@ -243,7 +246,7 @@ def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
         os.remove(logpath)
     with open(os.path.join(rundir, "system", "controlDict"), "w") as f:
         f.write(control_dict(kind, dt, end_time, write_interval, start_from,
-                             logpath, cstep=cstep))
+                             logpath, cstep=cstep, bbpa_extra=bbpa_extra))
     return rundir, logpath
 
 
@@ -299,8 +302,9 @@ def _time_dirs(base):
     return out
 
 
-def latest_cycle_start(rundir, parallel=False):
-    """Largest k*period at which BBPA wrote a FULL set of I phase-aligned bins.
+def latest_cycle_start(rundir, parallel=False, fname="U_PA"):
+    """Largest k*period at which BBPA wrote a FULL set of I phase-aligned bins
+    (a `fname` file in every bin dir; use fname="U_BinPA" for writeMode bin).
     Needed because a non-power-of-two dt (e.g. 0.05) accumulates float drift, so
     the final write can land at cycleStart < endTime (e.g. 5.0 rather than 6.0)."""
     base = os.path.join(rundir, "processor0") if parallel else rundir
@@ -314,7 +318,7 @@ def latest_cycle_start(rundir, parallel=False):
         for j in range(I):
             bt = cs + j * BIN_DT
             if not any(abs(tv - bt) < 1e-7 and
-                       os.path.isfile(os.path.join(full, "U_PA"))
+                       os.path.isfile(os.path.join(full, fname))
                        for tv, full in tdirs.items()):
                 ok = False
                 break
@@ -323,11 +327,13 @@ def latest_cycle_start(rundir, parallel=False):
     return None
 
 
-def read_bbpa_output(rundir, cycle_start, parallel=False):
+def read_bbpa_output(rundir, cycle_start, parallel=False, suffix="_PA"):
     """
     Read BBPA's phase-aligned output at the write whose cycle starts at
     `cycle_start` (bins at cycle_start + j*BIN_DT).  Returns
     bin -> {PA: vec3, PA_UU: 3x3, PAVariance: scalar or None}.
+    `suffix` selects the naming family: "_PA" (default) or "_BinPA"
+    (writeMode bin).
     """
     base = os.path.join(rundir, "processor0") if parallel else rundir
     tdirs = _time_dirs(base)
@@ -342,20 +348,65 @@ def read_bbpa_output(rundir, cycle_start, parallel=False):
                 break
         if match is None:
             continue
-        rec = {}
-        pPA = os.path.join(match, "U_PA")
-        pUU = os.path.join(match, "U_PA_UU")
-        pVar = os.path.join(match, "U_PAVariance")
-        if os.path.isfile(pPA):
-            rec["PA"] = bo.read_of_internal_first(pPA)
-        if os.path.isfile(pUU):
-            rec["PA_UU"] = bo.symm6_to_mat(bo.read_of_internal_first(pUU))
-        if os.path.isfile(pVar):
-            rec["PAVariance"] = float(bo.read_of_internal_first(pVar))
-        else:
-            rec["PAVariance"] = None
+        rec = _read_bin_record(match, suffix)
         if rec:
             out[j] = rec
+    return out
+
+
+def _read_bin_record(tdir, suffix):
+    """Read U<suffix>/U<suffix>_UU/U<suffix>Variance from one time dir."""
+    rec = {}
+    pPA = os.path.join(tdir, "U" + suffix)
+    pUU = os.path.join(tdir, "U" + suffix + "_UU")
+    pVar = os.path.join(tdir, "U" + suffix + "Variance")
+    if os.path.isfile(pPA):
+        rec["PA"] = bo.read_of_internal_first(pPA)
+    if os.path.isfile(pUU):
+        rec["PA_UU"] = bo.symm6_to_mat(bo.read_of_internal_first(pUU))
+    if os.path.isfile(pVar):
+        rec["PAVariance"] = float(bo.read_of_internal_first(pVar))
+    else:
+        rec["PAVariance"] = None
+    return rec
+
+
+def read_companion_output(rundir, cycle_start):
+    """
+    Read companion-mode U_PA from the SOLVER's own write dirs across the final
+    cycle: dir at t = cycle_start + j*BIN_DT holds the current bin j's pure
+    finalised cross-cycle mean (requires solver writeInterval == BIN_DT so each
+    bin phase has a write).  Returns bin -> {PA: vec3}.
+    """
+    tdirs = _time_dirs(rundir)
+    out = {}
+    for j in range(I):
+        bt = cycle_start + j * BIN_DT
+        for tv, full in tdirs.items():
+            if abs(tv - bt) < 1e-7:
+                p = os.path.join(full, "U_PA")
+                if os.path.isfile(p):
+                    out[j] = {"PA": bo.read_of_internal_first(p)}
+                break
+    return out
+
+
+def read_bin_files(rundir, cycle_start):
+    """
+    Read writeMode-bin per-cycle U_Bin (THIS cycle's bin mean, no cross-cycle
+    averaging) from the phase-aligned dirs of the cycle starting at
+    `cycle_start`.  Returns bin -> vec3.
+    """
+    tdirs = _time_dirs(rundir)
+    out = {}
+    for j in range(I):
+        bt = cycle_start + j * BIN_DT
+        for tv, full in tdirs.items():
+            if abs(tv - bt) < 1e-7:
+                p = os.path.join(full, "U_Bin")
+                if os.path.isfile(p):
+                    out[j] = bo.read_of_internal_first(p)
+                break
     return out
 
 
