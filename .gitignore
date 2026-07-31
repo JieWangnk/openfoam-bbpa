@@ -13,6 +13,10 @@ tutorials/*/*.foam
 tutorials/*/VTK/
 !tutorials/*/0/
 
+## Test-suite run artifacts (tests/ generates its cases under _runs/)
+tests/_runs/
+tests/results/
+
 ## Editor / OS
 *.swp
 *.swo
