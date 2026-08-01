@@ -194,16 +194,16 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins
+        writer::flushClosedBins
         (
-            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), time_, cycleStart, binDeltaT_, now, skip, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins
+        writer::flushClosedBins
         (
-            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), time_, cycleStart, binDeltaT_, now, skip, centreOffset
         );
     }
 }
@@ -334,8 +334,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
         iter
     )
     {
-        iter()->write
+        writer::phaseAligned
         (
+            *iter(), 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -350,8 +351,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
         iter
     )
     {
-        iter()->write
+        writer::phaseAligned
         (
+            *iter(), 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -370,14 +372,14 @@ void Foam::functionObjects::BBPA::writeCompanionAllFields()
         HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter
     )
     {
-        iter()->writeCompanion(time_, currentBin_);
+        writer::companion(*iter(), time_, currentBin_);
     }
     forAllConstIter
     (
         HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter
     )
     {
-        iter()->writeCompanion(time_, currentBin_);
+        writer::companion(*iter(), time_, currentBin_);
     }
 }
 

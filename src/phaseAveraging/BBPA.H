@@ -391,6 +391,28 @@ class BBPA
             //  partially covered and must not be weighted as a whole cycle.
             void finalizeCycle(const label skipBin = -1);
 
+            //- "bin" mode: restore the in-progress cycle's completed bins from
+            //  the <field>_Bin / <field>_Bin_UU written before a kill, so a
+            //  restart resumes mid-cycle instead of discarding it.
+            //  Returns the number of bins recovered.
+            label restoreCurrentCycleBins
+            (
+                const fvMesh& mesh,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const scalar now,
+                const scalar centreOffset
+            );
+        };
+
+
+        //- The output-layout concern (v2 separation): file names,
+        //  directories, and what is written when. Reads a binItem's
+        //  components; never computes or mutates a statistic
+        //  (flushClosedBins only marks bins as flushed). Definitions in
+        //  BBPAWriterTemplates.C.
+        struct writer
+        {
             //- Write the phase-aligned bin outputs.
             //  paSuffix selects the naming: "_PA" (default/back-compat) or
             //  "_BinPA" ("bin" mode). emitBin additionally writes
@@ -398,8 +420,10 @@ class BBPA
             //  different quantity from the cross-cycle mean and must never
             //  be blended into it. emitPA gates the cross-cycle files so
             //  they can be written less often than the per-cycle _Bin.
-            void write
+            template<class Type>
+            static void phaseAligned
             (
+                const binItem<Type>& bi,
                 const Time& time,
                 const label nBins,
                 const label currentCycle,
@@ -409,17 +433,19 @@ class BBPA
                 const word& paSuffix,
                 const bool emitBin,
                 const bool emitPA
-            ) const;
+            );
 
             //- Companion write: dump only the current-phase bin's PA
             //  field into the solver's current time directory (no
             //  phase-aligned sub-directories). Paired with an
             //  instantaneous snapshot in the same time dir.
-            void writeCompanion
+            template<class Type>
+            static void companion
             (
+                const binItem<Type>& bi,
                 const Time& time,
                 const label currentBinIndex
-            ) const;
+            );
 
             //- "bin" mode: flush every bin of the CURRENT cycle whose phase
             //  window has closed at or before 'now' and that has not been
@@ -444,26 +470,15 @@ class BBPA
             //  centreOffset (0 or binDeltaT/2) shifts the window-closed test
             //  to the CENTRED window end when binCentred is active, so a bin
             //  whose centred window closes at 'now' is treated as complete.
-            void writeCurrentCycleBins
+            template<class Type>
+            static void flushClosedBins
             (
+                binItem<Type>& bi,
                 const Time& time,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,
                 const scalar now,
                 const label skipBin,
-                const scalar centreOffset
-            );
-
-            //- "bin" mode: restore the in-progress cycle's completed bins from
-            //  the <field>_Bin / <field>_Bin_UU written before a kill, so a
-            //  restart resumes mid-cycle instead of discarding it.
-            //  Returns the number of bins recovered.
-            label restoreCurrentCycleBins
-            (
-                const fvMesh& mesh,
-                const scalar cycleStartTime,
-                const scalar binDeltaT,
-                const scalar now,
                 const scalar centreOffset
             );
         };
@@ -607,6 +622,7 @@ public:
 
 #ifdef NoRepository
     #include "BBPATemplates.C"
+    #include "BBPAWriterTemplates.C"
 #endif
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
