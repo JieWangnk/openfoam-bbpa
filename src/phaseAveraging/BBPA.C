@@ -428,6 +428,10 @@ Foam::functionObjects::BBPA::BBPA
     currentBin_(-1),
     previousBin_(-1),
     lastFullWriteCycle_(-1),
+    layout_("phaseAligned"),
+    cycleWriteInterval_(0),
+    writeFinal_(true),
+    writeProperties_(true),
     binNaming_(false),
     binsAtWriteTimes_(false),
     binCentred_(false),
@@ -708,6 +712,127 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             << "BBPA entry 'PAwriteInterval' is deprecated; use "
             << "'meanWriteIntervalCycles'." << endl;
         paWriteInterval_ = dict.lookup<label>("PAwriteInterval");
+    }
+
+    // ---- output{} (v2): WHERE and WHEN results are written ---------------
+    // Per-field options decide WHAT exists; this block decides layout and
+    // cadence; the accumulator has one numerical meaning throughout.
+    // Legacy writeMode words translate onto the same internals for one
+    // release (deprecated); the per-cycle _Bin capture is NOT a layout --
+    // it is the per-field writePerCycle product.
+    layout_ = "phaseAligned";
+    cycleWriteInterval_ = 0;          // legacy default: dump at every write
+    writeFinal_ = true;
+    writeProperties_ = true;
+
+    if (dict.found("output"))
+    {
+        if
+        (
+            dict.found("writeMode")
+         || dict.found("PAwriteInterval")
+         || dict.found("meanWriteIntervalCycles")
+        )
+        {
+            FatalErrorInFunction
+                << "give either 'output' or the deprecated "
+                << "'writeMode'/'PAwriteInterval'/'meanWriteIntervalCycles' "
+                << "entries, not both ('meanWriteIntervalCycles' moves "
+                << "inside output{})."
+                << exit(FatalError);
+        }
+
+        const dictionary& od = dict.subDict("output");
+
+        forAllConstIter(dictionary, od, iter)
+        {
+            const word& k = iter().keyword();
+            if
+            (
+                k != "layout"
+             && k != "cycleWriteInterval"
+             && k != "meanWriteIntervalCycles"
+             && k != "writeFinal"
+             && k != "writeProperties"
+            )
+            {
+                FatalErrorInFunction
+                    << "unknown output option '" << k << "'; valid options: "
+                    << "layout, cycleWriteInterval, meanWriteIntervalCycles, "
+                    << "writeFinal, writeProperties."
+                    << exit(FatalError);
+            }
+        }
+
+        layout_ = od.lookupOrDefault<word>("layout", word("phaseAligned"));
+        if
+        (
+            layout_ != "phaseAligned"
+         && layout_ != "companion"
+         && layout_ != "both"
+        )
+        {
+            FatalErrorInFunction
+                << "unknown output layout '" << layout_ << "'; valid "
+                << "values: phaseAligned, companion, both. (The per-cycle "
+                << "_Bin capture is the per-field writePerCycle option, "
+                << "not a layout.)"
+                << exit(FatalError);
+        }
+
+        cycleWriteInterval_ =
+            od.lookupOrDefault<label>("cycleWriteInterval", 1);
+        if (cycleWriteInterval_ < 0)
+        {
+            FatalErrorInFunction
+                << "'cycleWriteInterval' must be >= 0 (0 = at every "
+                << "write); got " << cycleWriteInterval_ << "."
+                << exit(FatalError);
+        }
+
+        paWriteInterval_ =
+            od.lookupOrDefault<label>("meanWriteIntervalCycles", 1);
+        writeFinal_ = od.lookupOrDefault<Switch>("writeFinal", true);
+        writeProperties_ =
+            od.lookupOrDefault<Switch>("writeProperties", true);
+
+        // v2 output has ONE naming (_PA*); the _BinPA spelling belongs to
+        // the legacy bin writeMode only.
+        binNaming_ = false;
+
+        if (!writeProperties_)
+        {
+            WarningInFunction
+                << "output.writeProperties is off: no restart checkpoint "
+                << "will be written; this run cannot be restarted." << endl;
+        }
+    }
+    else
+    {
+        if (dict.found("writeMode"))
+        {
+            WarningInFunction
+                << "BBPA entry 'writeMode' is deprecated; use "
+                << "output { layout phaseAligned|companion|both; ... } "
+                << "with the per-field writePerCycle product for the "
+                << "per-cycle _Bin capture." << endl;
+        }
+
+        // Legacy translation onto the same internals.
+        if (writeMode_ == "companion")
+        {
+            layout_ = "companion";
+        }
+        else if (writeMode_ == "both")
+        {
+            layout_ = "both";
+            cycleWriteInterval_ = -1;   // dump at the final write only
+        }
+        else if (writeMode_ == "perCycle" || writeMode_ == "bin")
+        {
+            cycleWriteInterval_ = 1;
+        }
+        // "phaseAlignedDirs": the defaults above (dump at every write)
     }
 
 
@@ -1002,10 +1127,7 @@ bool Foam::functionObjects::BBPA::execute()
          && previousCycle_ < (startCycle_ + cycles_)
         )
         {
-            if (binNaming_)
-            {
-                flushCurrentCycleBins(previousCycle_);
-            }
+            flushCurrentCycleBins(previousCycle_);
 
             const label skip =
                 (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
@@ -1037,10 +1159,7 @@ bool Foam::functionObjects::BBPA::execute()
             // so it has never been flushed by a write() call inside the cycle.
             // Persist it before resetAllBinsForNewCycle() wipes the
             // accumulator, or its _Bin_UU would never be written at all.
-            if (binNaming_)
-            {
-                flushCurrentCycleBins(previousCycle_);
-            }
+            flushCurrentCycleBins(previousCycle_);
 
             // Finalize the previous cycle (only if it was being averaged).
             // If a restart landed mid-bin during THIS cycle, that one bin saw
@@ -1094,52 +1213,61 @@ bool Foam::functionObjects::BBPA::execute()
 
 bool Foam::functionObjects::BBPA::write()
 {
-    Info<< type() << " " << name() << " write (mode="
-        << writeMode_ << "):" << nl;
+    Info<< type() << " " << name() << " write (layout="
+        << layout_ << "):" << nl;
 
     const bool isLastWrite =
         (time_.value() + 0.5*time_.deltaT().value() >= time_.endTime().value());
 
-    // "bin" mode: persist the CURRENT cycle's newly-closed bins before
-    // anything else. This is what makes the output restart-safe at write
-    // granularity: a kill then loses only the bin it lands in, instead of the
-    // entire in-progress cycle (measured: 15 of 25 bins lost to a SIGKILL
-    // before this, 1 after).
-    if (binNaming_)
+    // Persist the CURRENT cycle's newly-closed bins for every field with
+    // the per-cycle capture (no-op for the rest). This is what makes the
+    // output restart-safe at write granularity: a kill then loses only the
+    // bin it lands in, instead of the entire in-progress cycle (measured:
+    // 15 of 25 bins lost to a SIGKILL before this, 1 after).
+    flushCurrentCycleBins(currentCycle_);
+
+    if (layout_ == "companion" || layout_ == "both")
     {
-        flushCurrentCycleBins(currentCycle_);
+        writeCompanionAllFields();
     }
 
-    if (writeMode_ == "companion")
+    if (layout_ != "companion")
     {
-        writeCompanionAllFields();
-    }
-    else if (writeMode_ == "both")
-    {
-        writeCompanionAllFields();
-        if (isLastWrite)
+        // Phase-aligned dump cadence: 0 = every write() call; N > 0 = once
+        // per N completed cycles (the first write after every Nth cycle
+        // boundary; cuts the bin-output I/O by ~period/writeInterval while
+        // staying a full, restart-safe checkpoint); -1 = never on cadence
+        // (legacy "both"). writeFinal_ forces the last write regardless.
+        // lastFullWriteCycle_ starts at -1 and is not persisted, so the
+        // first write after any (re)start re-establishes the checkpoint.
+        bool due = false;
+        if (cycleWriteInterval_ == 0)
         {
-            writeAllAveragedFields(true);
+            due = true;
         }
-    }
-    else if (writeMode_ == "bin" || writeMode_ == "perCycle")
-    {
-        // Full phase-aligned dump, but only once per completed cycle (the
-        // first write after a cycle boundary) instead of every solver write.
-        // Cuts the bin-output I/O by ~period/writeInterval while staying a
-        // full, restart-safe checkpoint at each cycle (restart granularity =
-        // one cycle). lastFullWriteCycle_ starts at -1 and is not persisted,
-        // so the first write after any (re)start re-establishes the checkpoint.
-        if (currentCycle_ > lastFullWriteCycle_)
+        else if
+        (
+            cycleWriteInterval_ > 0
+         && currentCycle_ > lastFullWriteCycle_
+         && (currentCycle_ % cycleWriteInterval_) == 0
+        )
         {
-            // "bin" mode: the per-cycle _Bin file is written every cycle,
-            // but the cross-cycle _BinPA* only every PAwriteInterval cycles
-            // (or, when PAwriteInterval <= 0, on the final write only).
-            // The completed-cycle count is currentCycle_ (cycle currentCycle_-1
-            // has just been folded in).
+            due = true;
+        }
+        if (writeFinal_ && isLastWrite)
+        {
+            due = true;
+        }
+
+        if (due)
+        {
+            // The cross-cycle _PA* files can be written less often than
+            // the per-cycle _Bin: every meanWriteIntervalCycles completed
+            // cycles, or (<= 0) at the final write only. The
+            // completed-cycle count is currentCycle_ (cycle
+            // currentCycle_-1 has just been folded in).
             const bool emitPA =
-                !binNaming_
-             || (paWriteInterval_ <= 0
+                (paWriteInterval_ <= 0
                     ? isLastWrite
                     : (currentCycle_ % paWriteInterval_) == 0)
              || isLastWrite;
@@ -1148,16 +1276,13 @@ bool Foam::functionObjects::BBPA::write()
             lastFullWriteCycle_ = currentCycle_;
         }
     }
-    else
-    {
-        // default: "phaseAlignedDirs" (Strategy B, back-compat)
-        writeAllAveragedFields(true);
-    }
 
     // Checkpoint: save scalar counters so the run can be restarted.
+    // (Suppressed entirely by output.writeProperties off.)
     // The stats_.mean_ and stats_.M2_ are written by AUTO_WRITE; this
     // dict saves the counters that cannot be reconstructed from the
     // fields alone.
+    if (writeProperties_)
     {
         timeIOdictionary propsDict
         (
@@ -1687,7 +1812,8 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             // by restoredFields_, so it runs exactly once per field -- including
             // a late-registering derived field -- and never re-clobbers a field
             // that has already accumulated new steps since the restart.
-            if (binNaming_ && inProgressCaptured_)
+            // per-item: no-op for fields without the per-cycle capture
+            if (inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
                 const label nrec = state::restoreClosedBins
@@ -1758,7 +1884,8 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             // by restoredFields_, so it runs exactly once per field -- including
             // a late-registering derived field -- and never re-clobbers a field
             // that has already accumulated new steps since the restart.
-            if (binNaming_ && inProgressCaptured_)
+            // per-item: no-op for fields without the per-cycle capture
+            if (inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
                 const label nrec = state::restoreClosedBins

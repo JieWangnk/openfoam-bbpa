@@ -24,6 +24,7 @@ for t in \
     test_dictNames \
     test_products \
     test_restartMeta \
+    test_output \
     test_invalidInput
 do
     echo "==== $t ===="

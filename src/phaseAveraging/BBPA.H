@@ -143,6 +143,28 @@ class BBPA
         //     binNaming_ below for why the extra file matters.
         word writeMode_;
 
+        //- v2 output{}: WHERE files go. "phaseAligned" (the bins' own
+        //  time dirs), "companion" (the current bin beside the solver's
+        //  fields), or "both". The per-cycle _Bin capture is NOT a layout
+        //  -- it is the per-field writePerCycle product. Legacy writeMode
+        //  words translate onto layout_ + cycleWriteInterval_ +
+        //  writeFinal_.
+        word layout_;
+
+        //- Phase-aligned dump cadence, in completed cycles:
+        //  0 = at every write() call (the legacy phaseAlignedDirs
+        //  behaviour, and the default when no output{} is given);
+        //  N > 0 = once per N completed cycles; -1 = never on cadence
+        //  (legacy "both": final dump only).
+        label cycleWriteInterval_;
+
+        //- Force a full phase-aligned dump at the final write
+        bool writeFinal_;
+
+        //- Write the restart checkpoint (Properties dict + state files).
+        //  Off = the run cannot be restarted; warned at read.
+        bool writeProperties_;
+
         //- "bin" mode: use the <field>_Bin / _BinPA / _BinPA_UU /
         //  _BinPAVariance naming instead of <field>_PA / _PA_UU /
         //  _PAVariance, and emit the extra _Bin file.

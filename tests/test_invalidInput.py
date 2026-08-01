@@ -128,6 +128,20 @@ ROWS = [
      "        fields ( U { phaseMean off; } );\n"
      "        period 1.0;\n        nBins 8;\n",
      "unknown per-field option", 1.0),
+    # --- step-7b output{} rows ---
+    ("output_and_writeMode",
+     BASE + "        output { layout companion; }\n"
+            "        writeMode companion;\n",
+     "not both", 1.0),
+    ("unknown_output_layout",
+     BASE + "        output { layout bin; }\n",
+     "unknown output layout", 1.0),
+    ("unknown_output_option",
+     BASE + "        output { cadence 2; }\n",
+     "unknown output option", 1.0),
+    ("negative_cycleWriteInterval",
+     BASE + "        output { cycleWriteInterval -2; }\n",
+     "must be >= 0", 1.0),
 ]
 
 
