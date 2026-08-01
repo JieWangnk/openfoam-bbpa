@@ -43,6 +43,7 @@ Description
 
 #include "fvMeshFunctionObject.H"
 #include "phaseClock.H"
+#include "binAccumulators.H"
 #include "volFieldsFwd.H"
 #include "HashPtrTable.H"
 #include "HashSet.H"
@@ -58,15 +59,9 @@ namespace Foam
 namespace functionObjects
 {
 
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-//  Trait: type of phi*phi for the second-moment accumulator.
-//    scalar     -> scalar      (<p*p>)
-//    vector     -> symmTensor  (<U*U> = 6-component Reynolds stress tensor)
-//    symmTensor -> symmTensor
-//    tensor     -> tensor
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-template<class T> struct bbpaSqrTypeOf { typedef T type; };
-template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
+// bbpaSqrTypeOf (the phi*phi trait) and the two data components of a binItem
+// -- binIntegrator (current cycle) and cycleStatistics (cross-cycle ensemble)
+// -- live in binAccumulators.H (v2 separation of calculation concerns).
 
 
 /*---------------------------------------------------------------------------*\
@@ -322,41 +317,28 @@ class BBPA
             typedef VolField<SqrType> SqrFieldType;
 
             word fieldName_;
-            label nCycles_;
-            scalarField binCounts_;
 
-            //- Phase-averaged mean fields (one per bin, preserves full type)
-            PtrList<FieldType> meanFields_;
+            //- CURRENT cycle's time-weighted accumulation (weights, first
+            //  and second moments per bin). execute() writes here; reset at
+            //  every cycle boundary. See binAccumulators.H.
+            binIntegrator<Type> integ_;
 
-            //- Welford M2 accumulator: sum of squared deviations from
-            //  running mean (numerically stable variance)
-            PtrList<volScalarField> M2Fields_;
-
-            //- Current cycle: total time accumulated in each bin
-            scalarField currentCycleBinTime_;
-
-            //- Current cycle: time-weighted sum for each bin
-            PtrList<FieldType> currentCycleBinSum_;
-
-            //- Cross-cycle running mean of <phi*phi> per bin. For a vector
-            //  field this is the full 6-component <U_i U_j> tensor; the
-            //  Reynolds stress follows as <U_i U_j> - <U_i><U_j> and TKE
-            //  as 0.5 * trace of that. For a scalar it reduces to <p*p>.
-            PtrList<SqrFieldType> meanSqrFields_;
-
-            //- Current cycle: time-weighted sum of (phi*phi) for each bin
-            PtrList<SqrFieldType> currentCycleBinSqrSum_;
+            //- CROSS-CYCLE ensemble over completed cycles (counts, running
+            //  mean, Welford M2, mean second moment <phi*phi> from which
+            //  Reynolds stress and TKE are recovered offline). Written only
+            //  by the finalizeCycle() fold. See binAccumulators.H.
+            cycleStatistics<Type> stats_;
 
             //- "bin" mode only (empty otherwise): the bin mean of the cycle
             //  that JUST completed, captured by finalizeCycle() before the
             //  accumulators are reset.
             //
             //  It has to be captured rather than read from
-            //  currentCycleBinSum_ at write time, because execute() runs
+            //  integ_.binSum_ at write time, because execute() runs
             //  finalizeAllForCycle() and then resetAllBinsForNewCycle() on the
             //  cycle transition, and only afterwards does the framework call
-            //  write(). By then currentCycleBinTime_ is zero and the completed
-            //  cycle's bin is gone -- folded into meanFields_ and unrecoverable
+            //  write(). By then integ_.binTime_ is zero and the completed
+            //  cycle's bin is gone -- folded into stats_.mean_ and unrecoverable
             //  from it.
             PtrList<FieldType> lastCycleFields_;
 
@@ -445,7 +427,7 @@ class BBPA
             //  phase-aligned directory.
             //
             //  Both files are needed, not just the mean: the restore
-            //  reconstructs currentCycleBinSum_ AND currentCycleBinSqrSum_ from
+            //  reconstructs integ_.binSum_ AND integ_.binSqrSum_ from
             //  them. Restoring the mean alone would leave the second-moment
             //  accumulator at zero while its bin time said "full", and
             //  finalizeCycle() would then fold a genuine zero into <UiUj> --
@@ -546,7 +528,7 @@ class BBPA
         //  previousCycle, per-field nCycles + binCounts) and the
         //  phase-aligned _PA / _PAVariance / _PA_UU fields written
         //  at the most recent solver writeTime, reconstructing the
-        //  internal meanFields_, M2Fields_ and meanSqrFields_ arrays.
+        //  internal stats_.mean_, stats_.M2_ and stats_.meanSqr_ arrays.
         //  No-op when no Properties file is found (= cold start).
         void readCheckpoint();
 

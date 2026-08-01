@@ -934,7 +934,7 @@ bool Foam::functionObjects::BBPA::write()
     }
 
     // Checkpoint: save scalar counters so the run can be restarted.
-    // The meanFields_ and M2Fields_ are written by AUTO_WRITE; this
+    // The stats_.mean_ and stats_.M2_ are written by AUTO_WRITE; this
     // dict saves the counters that cannot be reconstructed from the
     // fields alone.
     {
@@ -965,8 +965,8 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
+            fieldDict.add("nCycles", iter()->stats_.nCycles_);
+            fieldDict.add("binCounts", iter()->stats_.binCounts_);
             propsDict.add(iter.key(), fieldDict);
         }
         forAllConstIter
@@ -977,8 +977,8 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
+            fieldDict.add("nCycles", iter()->stats_.nCycles_);
+            fieldDict.add("binCounts", iter()->stats_.binCounts_);
             propsDict.add(iter.key(), fieldDict);
         }
         propsDict.regIOobject::write();
@@ -1142,17 +1142,17 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         inProgressCaptured_ = true;
     }
 
-    // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
+    // Reconstruct stats_.mean_, stats_.M2_ and stats_.meanSqr_ from the
     // phase-aligned _PA / _PAVariance / _PA_UU files.  At the most
     // recent writeTime (just after cycle finalisation), the public
     // bin fields satisfy:
     //
     //     <name>_PA[binI]         at t = cycleStart + binI*binDeltaT
-    //                              = meanFields_[binI]
+    //                              = stats_.mean_[binI]
     //     <name>_PAVariance[binI] at the same t
-    //                              = M2Fields_[binI] / (nCycles - 1)
+    //                              = stats_.M2_[binI] / (nCycles - 1)
     //     <name>_PA_UU[binI]      at the same t
-    //                              = meanSqrFields_[binI]
+    //                              = stats_.meanSqr_[binI]
     //
     // Restore by reading from the appropriate phase-aligned dirs.  Uses the
     // checkpoint's own cycle start (captured above), so this is correct both
@@ -1177,7 +1177,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         {
             const dictionary& fd = propsDict.subDict(fname);
             // Guard against a checkpoint from a run with a DIFFERENT nBins.
-            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // stats_.binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
             // to the checkpoint's size, after which every downstream loop over
             // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
             // free(): invalid pointer crash. Reject a mismatched checkpoint and
@@ -1197,8 +1197,8 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 restoredFields_.insert(fname);
                 continue;
             }
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = loadedCounts;
+            iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
+            iter()->stats_.binCounts_ = loadedCounts;
             restoreBinItemFromDisk
             (
                 *(iter()), fname, cycleStart,
@@ -1227,7 +1227,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
 
             Info<< "    Restored field " << fname
-                << ": nCycles=" << iter()->nCycles_ << endl;
+                << ": nCycles=" << iter()->stats_.nCycles_ << endl;
         }
         // Field absent from the checkpoint (not tracked in the previous
         // run): a cold start is correct for it. Mark it done so we do not
@@ -1248,7 +1248,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         {
             const dictionary& fd = propsDict.subDict(fname);
             // Guard against a checkpoint from a run with a DIFFERENT nBins.
-            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // stats_.binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
             // to the checkpoint's size, after which every downstream loop over
             // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
             // free(): invalid pointer crash. Reject a mismatched checkpoint and
@@ -1268,8 +1268,8 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 restoredFields_.insert(fname);
                 continue;
             }
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = loadedCounts;
+            iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
+            iter()->stats_.binCounts_ = loadedCounts;
             restoreBinItemFromDisk
             (
                 *(iter()), fname, cycleStart,
@@ -1298,7 +1298,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
 
             Info<< "    Restored field " << fname
-                << ": nCycles=" << iter()->nCycles_ << endl;
+                << ": nCycles=" << iter()->stats_.nCycles_ << endl;
         }
         restoredFields_.insert(fname);
     }

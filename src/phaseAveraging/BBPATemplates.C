@@ -112,14 +112,8 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
 )
 :
     fieldName_(name),
-    nCycles_(0),
-    binCounts_(nBins, 0.0),
-    meanFields_(nBins),
-    M2Fields_(nBins),
-    currentCycleBinTime_(nBins, 0.0),
-    currentCycleBinSum_(nBins),
-    meanSqrFields_(nBins),
-    currentCycleBinSqrSum_(nBins),
+    integ_(nBins),
+    stats_(nBins),
     lastCycleFields_(keepLastCycle ? nBins : 0),
     lastCycleBinTime_(keepLastCycle ? nBins : 0, 0.0),
     binFlushed_(keepLastCycle ? nBins : 0, false)
@@ -137,16 +131,16 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
         isActive[activeBins[k]] = true;
     }
 
-    forAll(meanFields_, binI)
+    forAll(stats_.mean_, binI)
     {
         if (!isActive[binI])
         {
             // Leave this bin's accumulators unallocated (null). Skipped
-            // everywhere downstream by the binCounts_/currentCycleBinTime_
+            // everywhere downstream by the stats_.binCounts_/integ_.binTime_
             // and PtrList::set() guards.
             continue;
         }
-        meanFields_.set
+        stats_.mean_.set
         (
             binI,
             new FieldType
@@ -165,7 +159,7 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        M2Fields_.set
+        stats_.M2_.set
         (
             binI,
             new volScalarField
@@ -184,7 +178,7 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        currentCycleBinSum_.set
+        integ_.binSum_.set
         (
             binI,
             new FieldType
@@ -203,7 +197,7 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        meanSqrFields_.set
+        stats_.meanSqr_.set
         (
             binI,
             new SqrFieldType
@@ -222,7 +216,7 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        currentCycleBinSqrSum_.set
+        integ_.binSqrSum_.set
         (
             binI,
             new SqrFieldType
@@ -261,12 +255,12 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
 {
     if (binFlushed_.empty()) return;
 
-    forAll(currentCycleBinSum_, binI)
+    forAll(integ_.binSum_, binI)
     {
-        if (!currentCycleBinSum_.set(binI)) continue;   // sparse-bin mode
+        if (!integ_.binSum_.set(binI)) continue;   // sparse-bin mode
         if (binI == skipBin) continue;                  // restart-straddled
         if (binFlushed_[binI]) continue;                // already on disk
-        if (currentCycleBinTime_[binI] <= 0) continue;  // no data yet
+        if (integ_.binTime_[binI] <= 0) continue;  // no data yet
 
         // The bin is complete only once the solver has passed its UPPER edge.
         // Writing earlier would persist a partial window that a restart would
@@ -278,8 +272,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;
         const word binTimeName = Time::timeName(binTime);
-        const fvMesh& mesh = currentCycleBinSum_[binI].mesh();
-        const scalar inv = 1.0/currentCycleBinTime_[binI];
+        const fvMesh& mesh = integ_.binSum_[binI].mesh();
+        const scalar inv = 1.0/integ_.binTime_[binI];
 
         FieldType binField
         (
@@ -292,12 +286,12 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
                 IOobject::NO_WRITE,
                 false
             ),
-            currentCycleBinSum_[binI]*inv
+            integ_.binSum_[binI]*inv
         );
         writePAField(binField, mesh, binTimeName);
 
         // The per-cycle second moment must be persisted too: the restore
-        // rebuilds currentCycleBinSqrSum_ from it. Without it a recovered bin
+        // rebuilds integ_.binSqrSum_ from it. Without it a recovered bin
         // would carry a full bin time but a zero second moment, and
         // finalizeCycle() would fold that zero into <UiUj> as real data.
         SqrFieldType binUU
@@ -311,7 +305,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCurrentCycleBins
                 IOobject::NO_WRITE,
                 false
             ),
-            currentCycleBinSqrSum_[binI]*inv
+            integ_.binSqrSum_[binI]*inv
         );
         writePAField(binUU, mesh, binTimeName);
 
@@ -335,9 +329,9 @@ Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
 
     label recovered = 0;
 
-    forAll(currentCycleBinSum_, binI)
+    forAll(integ_.binSum_, binI)
     {
-        if (!currentCycleBinSum_.set(binI)) continue;
+        if (!integ_.binSum_.set(binI)) continue;
 
         // Recover any bin whose window STARTED before the restart instant and
         // whose complete <field>_Bin is on disk. This deliberately INCLUDES the
@@ -398,9 +392,9 @@ Foam::functionObjects::BBPA::binItem<Type>::restoreCurrentCycleBins
 
         // The files hold the bin MEANS; the accumulators hold time-weighted
         // SUMS. The bin is complete, so its weight is exactly binDeltaT.
-        currentCycleBinSum_[binI] = loaded*binDeltaT;
-        currentCycleBinSqrSum_[binI] = loadedUU*binDeltaT;
-        currentCycleBinTime_[binI] = binDeltaT;
+        integ_.binSum_[binI] = loaded*binDeltaT;
+        integ_.binSqrSum_[binI] = loadedUU*binDeltaT;
+        integ_.binTime_[binI] = binDeltaT;
         binFlushed_[binI] = true;      // already on disk; do not rewrite
         recovered++;
     }
@@ -413,18 +407,7 @@ template<class Type>
 void Foam::functionObjects::BBPA::binItem<Type>::resetCurrentCycle()
 {
     binFlushed_ = false;
-    currentCycleBinTime_ = 0.0;
-
-    forAll(currentCycleBinSum_, binI)
-    {
-        // Skip bins not allocated in sparse-bin mode.
-        if (!currentCycleBinSum_.set(binI)) continue;
-
-        currentCycleBinSum_[binI] =
-            dimensioned<Type>(currentCycleBinSum_[binI].dimensions(), Zero);
-        currentCycleBinSqrSum_[binI] =
-            dimensioned<SqrType>(currentCycleBinSqrSum_[binI].dimensions(), Zero);
-    }
+    integ_.reset();
 }
 
 
@@ -437,9 +420,9 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
 )
 {
     // Sparse-bin mode: if the current phase lands in a bin that was not
-    // allocated, do nothing -- and crucially do NOT touch
-    // currentCycleBinTime_, so finalizeCycle()/write() skip it too.
-    if (!currentCycleBinSum_.set(binI)) return;
+    // allocated, do nothing -- and crucially do NOT touch the bin weight,
+    // so finalizeCycle()/write() skip it too.
+    if (!integ_.active(binI)) return;
 
     // A bin already recovered from disk this cycle (binFlushed_) holds its
     // COMPLETE window average. When a restart resumes from an EARLIER write the
@@ -451,12 +434,9 @@ void Foam::functionObjects::BBPA::binItem<Type>::accumulate
     if (!binFlushed_.empty() && binFlushed_[binI]) return;
 
     // Time-weighted accumulation: phi(t)*dt (first moment) and
-    // sqr(phi(t))*dt (second moment). For vector phi, sqr() returns
-    // a symmTensor (phi_i phi_j) enabling full Reynolds-stress recovery
-    // offline. For scalar phi, sqr() is the scalar square.
-    currentCycleBinTime_[binI] += dt;
-    currentCycleBinSum_[binI] += dt * field;
-    currentCycleBinSqrSum_[binI] += dt * sqr(field);
+    // sqr(phi(t))*dt (second moment; symmTensor phi_i phi_j for vector phi,
+    // enabling full Reynolds-stress recovery offline).
+    integ_.integrate(binI, field, dt);
 }
 
 
@@ -466,13 +446,13 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
     const label skipBin
 )
 {
-    nCycles_++;
+    stats_.nCycles_++;
 
     // Update overall statistics for each bin that has data
-    forAll(currentCycleBinSum_, binI)
+    forAll(integ_.binSum_, binI)
     {
         // Skip bins not allocated in sparse-bin mode (also have time==0).
-        if (!currentCycleBinSum_.set(binI)) continue;
+        if (!integ_.binSum_.set(binI)) continue;
 
         // Restart-straddled bin: a restart resumed at an instant strictly
         // inside this bin's phase window, so the cycle covered only the part
@@ -482,7 +462,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
         // average -- while looking entirely healthy on disk.
         //
         // Drop it exactly as a bin that received no data at all is dropped:
-        // binCounts_ is not incremented, so no cycle is ever credited without
+        // stats_.binCounts_ is not incremented, so no cycle is ever credited without
         // the data to back it. One cycle noisier, but UNBIASED -- the same
         // trade the missing-checkpoint recovery makes.
         //
@@ -503,8 +483,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
         // completed cycle's bin still exists.
         if (lastCycleFields_.size())
         {
-            lastCycleBinTime_[binI] = currentCycleBinTime_[binI];
-            if (currentCycleBinTime_[binI] > 0)
+            lastCycleBinTime_[binI] = integ_.binTime_[binI];
+            if (integ_.binTime_[binI] > 0)
             {
                 if (!lastCycleFields_.set(binI))
                 {
@@ -517,52 +497,52 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
                             (
                                 fieldName_ + "_lastCycle_bin"
                               + Foam::name(binI),
-                                currentCycleBinSum_[binI].mesh().time().name(),
-                                currentCycleBinSum_[binI].mesh(),
+                                integ_.binSum_[binI].mesh().time().name(),
+                                integ_.binSum_[binI].mesh(),
                                 IOobject::NO_READ,
                                 IOobject::NO_WRITE,
                                 false
                             ),
-                            currentCycleBinSum_[binI]/currentCycleBinTime_[binI]
+                            integ_.binSum_[binI]/integ_.binTime_[binI]
                         )
                     );
                 }
                 else
                 {
                     lastCycleFields_[binI] =
-                        currentCycleBinSum_[binI]/currentCycleBinTime_[binI];
+                        integ_.binSum_[binI]/integ_.binTime_[binI];
                 }
             }
         }
 
-        if (currentCycleBinTime_[binI] > 0)
+        if (integ_.binTime_[binI] > 0)
         {
             const FieldType cycleMean =
-                currentCycleBinSum_[binI] / currentCycleBinTime_[binI];
+                integ_.binSum_[binI] / integ_.binTime_[binI];
 
             const SqrFieldType cycleMeanSqr =
-                currentCycleBinSqrSum_[binI] / currentCycleBinTime_[binI];
+                integ_.binSqrSum_[binI] / integ_.binTime_[binI];
 
-            binCounts_[binI] += 1.0;
-            const scalar count = binCounts_[binI];
+            stats_.binCounts_[binI] += 1.0;
+            const scalar count = stats_.binCounts_[binI];
 
             if (count < 1.5)
             {
-                meanFields_[binI] = cycleMean;
-                meanSqrFields_[binI] = cycleMeanSqr;
-                M2Fields_[binI] = dimensionedScalar(M2Fields_[binI].dimensions(), 0);
+                stats_.mean_[binI] = cycleMean;
+                stats_.meanSqr_[binI] = cycleMeanSqr;
+                stats_.M2_[binI] = dimensionedScalar(stats_.M2_[binI].dimensions(), 0);
             }
             else
             {
                 // Welford's online algorithm for cycle-mean variance:
                 // M2 accumulates sum of squared deviations |x - <x>|^2
                 // of the BIN-AVERAGED value across cycles.
-                const FieldType delta(cycleMean - meanFields_[binI]);
+                const FieldType delta(cycleMean - stats_.mean_[binI]);
 
-                meanFields_[binI] =
-                    (meanFields_[binI] * (count - 1.0) + cycleMean) / count;
+                stats_.mean_[binI] =
+                    (stats_.mean_[binI] * (count - 1.0) + cycleMean) / count;
 
-                const FieldType delta2(cycleMean - meanFields_[binI]);
+                const FieldType delta2(cycleMean - stats_.mean_[binI]);
 
                 // Welford: M2 += (x - mean_old) . (x - mean_new). For a vector
                 // field, M2 is the scalar sum |x - <x>|^2, so the update is the
@@ -578,14 +558,14 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
                 // on a periodic flow (every cycle identical => variance ~ 0),
                 // which is why it survived; tutorials/planarPoiseuille exercises
                 // it with a developing flow whose cycles genuinely differ.
-                M2Fields_[binI] += bbpaInner(delta, delta2);
+                stats_.M2_[binI] += bbpaInner(delta, delta2);
 
                 // Running cross-cycle mean of <phi*phi>_bin. Combined
-                // with meanFields_ this recovers Reynolds stress
+                // with stats_.mean_ this recovers Reynolds stress
                 // R_ij = <U_i U_j> - <U_i><U_j> and TKE = 0.5 trace(R)
                 // offline from the written fields.
-                meanSqrFields_[binI] =
-                    (meanSqrFields_[binI] * (count - 1.0) + cycleMeanSqr) / count;
+                stats_.meanSqr_[binI] =
+                    (stats_.meanSqr_[binI] * (count - 1.0) + cycleMeanSqr) / count;
             }
         }
     }
@@ -609,21 +589,21 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
     // Find a mesh handle from the first ALLOCATED bin (in sparse-bin mode
     // bin 0 may be unallocated).
     const fvMesh* meshPtr = nullptr;
-    forAll(meanFields_, b)
+    forAll(stats_.mean_, b)
     {
-        if (meanFields_.set(b)) { meshPtr = &meanFields_[b].mesh(); break; }
+        if (stats_.mean_.set(b)) { meshPtr = &stats_.mean_[b].mesh(); break; }
     }
     if (meshPtr == nullptr) return;   // nothing allocated -> nothing to write
     const fvMesh& mesh = *meshPtr;
     label binsWritten = 0;
 
-    forAll(meanFields_, binI)
+    forAll(stats_.mean_, binI)
     {
         // Skip bins not allocated in sparse-bin mode.
-        if (!meanFields_.set(binI)) continue;
+        if (!stats_.mean_.set(binI)) continue;
 
-        const bool hasCrossData = binCounts_[binI] > 0;
-        const bool hasCurrentData = currentCycleBinTime_[binI] > 0;
+        const bool hasCrossData = stats_.binCounts_[binI] > 0;
+        const bool hasCurrentData = integ_.binTime_[binI] > 0;
 
         if (hasCrossData || hasCurrentData)
         {
@@ -683,15 +663,15 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                     IOobject::NO_WRITE,
                     false
                 ),
-                meanFields_[binI]
+                stats_.mean_[binI]
             );
 
-            // paField was constructed FROM meanFields_[binI], i.e. the mean over
-            // the binCounts_[binI] COMPLETE cycles folded so far. That is what
+            // paField was constructed FROM stats_.mean_[binI], i.e. the mean over
+            // the stats_.binCounts_[binI] COMPLETE cycles folded so far. That is what
             // <name>_PA must contain.
             //
             // It must NOT be blended with the in-progress cycle. The old code did
-            //     (meanFields_*nOld + currentCycleBinSum_/currentCycleBinTime_)
+            //     (stats_.mean_*nOld + integ_.binSum_/integ_.binTime_)
             //         / (nOld + 1)
             // which is wrong twice over:
             //  (1) the in-progress bin is PARTIAL -- with writeMode perCycle the
@@ -701,12 +681,12 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             //      bin 0 came out 0.632 against a true 0.701, i.e. (mean*2 + U_inst)/3,
             //      while every other bin (just reset, so no current data) was exact.
             //  (2) these files ARE the restart checkpoint: restoreBinItemFromDisk()
-            //      reads meanFields_ back out of <name>_PA. A blended value is
+            //      reads stats_.mean_ back out of <name>_PA. A blended value is
             //      therefore restored AS the folded mean and compounds at every
             //      restart.
             //
             // Only when no complete cycle exists yet is there nothing to report but
-            // the running partial. binCounts_[binI] is 0 in that case, and the
+            // the running partial. stats_.binCounts_[binI] is 0 in that case, and the
             // restore skips bins with count 0, so it can never be read back as a mean.
             //
             // Assign the WHOLE field, not primitiveFieldRef(): an internal-only
@@ -715,8 +695,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             // of the partial bin. See the _PA_UU note below.
             if (!hasCrossData && hasCurrentData)
             {
-                const scalar inv = 1.0 / currentCycleBinTime_[binI];
-                paField = currentCycleBinSum_[binI] * inv;
+                const scalar inv = 1.0 / integ_.binTime_[binI];
+                paField = integ_.binSum_[binI] * inv;
             }
 
             writePAField(paField, mesh, binTimeName);
@@ -724,7 +704,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             binsWritten++;
 
             // Welford cycle-variance (cycle-to-cycle variability of bin mean)
-            if (binCounts_[binI] > 1)
+            if (stats_.binCounts_[binI] > 1)
             {
                 volScalarField paVariance
                 (
@@ -737,7 +717,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                         IOobject::NO_WRITE,
                         false
                     ),
-                    M2Fields_[binI] / (binCounts_[binI] - 1.0)
+                    stats_.M2_[binI] / (stats_.binCounts_[binI] - 1.0)
                 );
 
                 writePAField(paVariance, mesh, binTimeName);
@@ -751,8 +731,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
             // Fires whenever we have data (finalised or in-progress bin).
             if (hasCrossData || hasCurrentData)
             {
-                // Construct FROM meanSqrFields_[binI], exactly as paField is
-                // constructed from meanFields_[binI] above. This is not a
+                // Construct FROM stats_.meanSqr_[binI], exactly as paField is
+                // constructed from stats_.mean_[binI] above. This is not a
                 // stylistic change: the previous form built a Zero field and
                 // then assigned only primitiveFieldRef(), so the BOUNDARY of
                 // <name>_PA_UU was never written and every patch came out
@@ -781,14 +761,14 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                         IOobject::NO_WRITE,
                         false
                     ),
-                    meanSqrFields_[binI]
+                    stats_.meanSqr_[binI]
                 );
 
                 // The raw second moment over the COMPLETE cycles only -- as for
                 // _PA above, and for the same two reasons: blending the
                 // in-progress cycle weights a partial bin (one timestep, on a
                 // perCycle write) as a whole cycle, and this file is the
-                // checkpoint that restoreBinItemFromDisk() reads meanSqrFields_
+                // checkpoint that restoreBinItemFromDisk() reads stats_.meanSqr_
                 // back out of, so a blended value would be restored AS the
                 // second moment and compound every restart.
                 //
@@ -801,8 +781,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
                 // report but the running partial.
                 if (!hasCrossData && hasCurrentData)
                 {
-                    const scalar invT = 1.0 / currentCycleBinTime_[binI];
-                    paUU = currentCycleBinSqrSum_[binI] * invT;
+                    const scalar invT = 1.0 / integ_.binTime_[binI];
+                    paUU = integ_.binSqrSum_[binI] * invT;
                 }
 
                 writePAField(paUU, mesh, binTimeName);
@@ -811,7 +791,7 @@ void Foam::functionObjects::BBPA::binItem<Type>::write
     }
 
     Info<< "    " << fieldName_ << " phase-averaged output:" << nl
-        << "        Cycles accumulated: " << nCycles_ << nl
+        << "        Cycles accumulated: " << stats_.nCycles_ << nl
         << "        Bins written: " << binsWritten << "/" << nBins << nl
         << "        Time range: " << Time::timeName(cycleStartTime)
         << " to " << Time::timeName(cycleStartTime + (nBins-1)*binDeltaT)
@@ -831,16 +811,16 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
     // own instantaneous field write at the same time, giving the
     // reader both U and U_PA in the same directory.
     const label binI = currentBinIndex;
-    if (binI < 0 || binI >= meanFields_.size()) return;
+    if (binI < 0 || binI >= stats_.mean_.size()) return;
 
     // Sparse-bin mode: nothing to write if the current bin is not tracked.
-    if (!meanFields_.set(binI)) return;
+    if (!stats_.mean_.set(binI)) return;
 
-    const bool hasCrossData = binCounts_[binI] > 0;
-    const bool hasCurrentData = currentCycleBinTime_[binI] > 0;
+    const bool hasCrossData = stats_.binCounts_[binI] > 0;
+    const bool hasCurrentData = integ_.binTime_[binI] > 0;
     if (!hasCrossData && !hasCurrentData) return;
 
-    const fvMesh& mesh = meanFields_[binI].mesh();
+    const fvMesh& mesh = stats_.mean_[binI].mesh();
     const word solverTimeName = time.timeName(time.value());
 
     // Build PA field for this bin, labelled with solver's current
@@ -856,13 +836,13 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
             IOobject::NO_WRITE,
             false
         ),
-        meanFields_[binI]
+        stats_.mean_[binI]
     );
 
     // The mean over the COMPLETE cycles only -- the same no-blend rule as the
     // phase-aligned write() above, for the same reason: the in-progress bin is
     // PARTIAL (often a single timestep) yet the old
-    //     (meanFields_*nOld + currentCycleBinSum_/currentCycleBinTime_)
+    //     (stats_.mean_*nOld + integ_.binSum_/integ_.binTime_)
     //         / (nOld + 1)
     // blend weighted it as a whole cycle. Removing it here makes the companion
     // output numerically identical to every other writeMode -- the output
@@ -871,8 +851,8 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
     // assignment (not primitiveFieldRef) so the boundary is written too.
     if (!hasCrossData)
     {
-        const scalar inv = 1.0 / currentCycleBinTime_[binI];
-        paField = currentCycleBinSum_[binI] * inv;
+        const scalar inv = 1.0 / integ_.binTime_[binI];
+        paField = integ_.binSum_[binI] * inv;
     }
 
     mkDir(paField.objectPath().path());
@@ -885,11 +865,11 @@ void Foam::functionObjects::BBPA::binItem<Type>::writeCompanion
 // At restart the existing _PA / _PAVariance / _PA_UU files written
 // at the most recent solver writeTime carry the cycle-N ensemble
 // state.  Per binItem<Type>::write() at the post-finalisation cycle
-// boundary (binCounts_[binI] > 0 && currentCycleBinTime_[binI] == 0):
+// boundary (stats_.binCounts_[binI] > 0 && integ_.binTime_[binI] == 0):
 //
-//     paField     = meanFields_[binI]                  (no blending)
-//     paVariance  = M2Fields_[binI] / (n - 1)          (only if n > 1)
-//     paUU        = meanSqrFields_[binI]               (no blending)
+//     paField     = stats_.mean_[binI]                  (no blending)
+//     paVariance  = stats_.M2_[binI] / (n - 1)          (only if n > 1)
+//     paUU        = stats_.meanSqr_[binI]               (no blending)
 //
 // Reverse-engineer the three internal arrays from the public outputs.
 template<class Type>
@@ -907,26 +887,26 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
     // Mesh handle from the first allocated bin (sparse-bin mode may
     // leave bin 0 unallocated).
     const fvMesh* meshPtr = nullptr;
-    forAll(bi.meanFields_, b)
+    forAll(bi.stats_.mean_, b)
     {
-        if (bi.meanFields_.set(b)) { meshPtr = &bi.meanFields_[b].mesh(); break; }
+        if (bi.stats_.mean_.set(b)) { meshPtr = &bi.stats_.mean_[b].mesh(); break; }
     }
     if (meshPtr == nullptr) return;
     const fvMesh& mesh = *meshPtr;
     label restored = 0;
 
-    forAll(bi.meanFields_, binI)
+    forAll(bi.stats_.mean_, binI)
     {
         // Skip bins not allocated in sparse-bin mode.
-        if (!bi.meanFields_.set(binI)) continue;
+        if (!bi.stats_.mean_.set(binI)) continue;
 
-        const scalar nCyc = bi.binCounts_[binI];
+        const scalar nCyc = bi.stats_.binCounts_[binI];
         if (nCyc <= 0) continue;  // bin never received data
 
         const scalar binTime = cycleStartTime + binI * binDeltaT_;
         const word binTimeName = Time::timeName(binTime);
 
-        // 1. mean: read fieldName_PA into meanFields_[binI].
+        // 1. mean: read fieldName_PA into stats_.mean_[binI].
         {
             IOobject paIO
             (
@@ -955,14 +935,14 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
                     << "/" << fieldName << paSuffix << " -- bin " << binI
                     << " reset to a clean cold start (count " << nCyc
                     << " -> 0) to avoid a low-biased average." << endl;
-                bi.binCounts_[binI] = 0;
-                bi.meanFields_[binI] =
-                    dimensioned<Type>(bi.meanFields_[binI].dimensions(), Zero);
-                bi.M2Fields_[binI] =
-                    dimensionedScalar(bi.M2Fields_[binI].dimensions(), 0);
-                bi.meanSqrFields_[binI] =
+                bi.stats_.binCounts_[binI] = 0;
+                bi.stats_.mean_[binI] =
+                    dimensioned<Type>(bi.stats_.mean_[binI].dimensions(), Zero);
+                bi.stats_.M2_[binI] =
+                    dimensionedScalar(bi.stats_.M2_[binI].dimensions(), 0);
+                bi.stats_.meanSqr_[binI] =
                     dimensioned<typename binItem<Type>::SqrType>
-                    (bi.meanSqrFields_[binI].dimensions(), Zero);
+                    (bi.stats_.meanSqr_[binI].dimensions(), Zero);
                 continue;
             }
 
@@ -975,7 +955,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
             // the whole accumulated field while the Properties counters still
             // claimed the cycles were there.
             FieldType loaded(paIO, mesh);
-            bi.meanFields_[binI] = loaded;
+            bi.stats_.mean_[binI] = loaded;
         }
 
         // 2. M2: read fieldName_PAVariance and rescale by (n-1).
@@ -996,11 +976,11 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
             if (Foam::isFile(varPath))
             {
                 volScalarField loadedVar(varIO, mesh);
-                bi.M2Fields_[binI] = loadedVar * (nCyc - 1.0);
+                bi.stats_.M2_[binI] = loadedVar * (nCyc - 1.0);
             }
         }
 
-        // 3. meanSqr: read fieldName_PA_UU into meanSqrFields_[binI].
+        // 3. meanSqr: read fieldName_PA_UU into stats_.meanSqr_[binI].
         {
             IOobject uuIO
             (
@@ -1017,7 +997,7 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
             if (Foam::isFile(uuPath))
             {
                 SqrFieldType loadedUU(uuIO, mesh);
-                bi.meanSqrFields_[binI] = loadedUU;
+                bi.stats_.meanSqr_[binI] = loadedUU;
             }
         }
 
@@ -1025,9 +1005,9 @@ void Foam::functionObjects::BBPA::restoreBinItemFromDisk
     }
 
     Info<< "    " << fieldName << ": restored "
-        << restored << "/" << bi.meanFields_.size()
+        << restored << "/" << bi.stats_.mean_.size()
         << " bins from phase-aligned dirs (cycleStart="
-        << cycleStartTime << ", nCycles=" << bi.nCycles_ << ")"
+        << cycleStartTime << ", nCycles=" << bi.stats_.nCycles_ << ")"
         << endl;
 }
 
