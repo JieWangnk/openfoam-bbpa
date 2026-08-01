@@ -218,16 +218,16 @@ Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        n += iter()->restoreCurrentCycleBins
+        n += state::restoreClosedBins
         (
-            mesh_, cycleStart, binDeltaT_, now, centreOffset
+            *iter(), mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        n += iter()->restoreCurrentCycleBins
+        n += state::restoreClosedBins
         (
-            mesh_, cycleStart, binDeltaT_, now, centreOffset
+            *iter(), mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
 
@@ -261,7 +261,7 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
     {
         // If this straddled bin's COMPLETE _Bin is already on disk, the run
         // resumed from a write EARLIER than the one that closed this bin, so
-        // restoreCurrentCycleBins recovered the whole window -- do NOT drop it.
+        // state::restoreClosedBins recovered the whole window -- do NOT drop it.
         // Only drop when it is genuinely unrecoverable: the cold-start bin 0
         // (nothing on disk yet), or a restart from the very write that straddles
         // a bin whose window had not closed (hence not flushed) before the kill.
@@ -1201,9 +1201,9 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
             iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
             iter()->stats_.binCounts_ = loadedCounts;
-            restoreBinItemFromDisk
+            state::restoreStatistics
             (
-                *(iter()), fname, cycleStart,
+                *(iter()), fname, cycleStart, binDeltaT_,
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
 
@@ -1215,9 +1215,9 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             if (binNaming_ && inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
-                const label nrec = iter()->restoreCurrentCycleBins
-                (
-                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                const label nrec = state::restoreClosedBins
+        (
+                    *iter(), mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
                 );
                 if (nrec > 0)
                 {
@@ -1272,9 +1272,9 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
             iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
             iter()->stats_.binCounts_ = loadedCounts;
-            restoreBinItemFromDisk
+            state::restoreStatistics
             (
-                *(iter()), fname, cycleStart,
+                *(iter()), fname, cycleStart, binDeltaT_,
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
 
@@ -1286,9 +1286,9 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             if (binNaming_ && inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
-                const label nrec = iter()->restoreCurrentCycleBins
-                (
-                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                const label nrec = state::restoreClosedBins
+        (
+                    *iter(), mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
                 );
                 if (nrec > 0)
                 {

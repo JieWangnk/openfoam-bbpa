@@ -391,18 +391,6 @@ class BBPA
             //  partially covered and must not be weighted as a whole cycle.
             void finalizeCycle(const label skipBin = -1);
 
-            //- "bin" mode: restore the in-progress cycle's completed bins from
-            //  the <field>_Bin / <field>_Bin_UU written before a kill, so a
-            //  restart resumes mid-cycle instead of discarding it.
-            //  Returns the number of bins recovered.
-            label restoreCurrentCycleBins
-            (
-                const fvMesh& mesh,
-                const scalar cycleStartTime,
-                const scalar binDeltaT,
-                const scalar now,
-                const scalar centreOffset
-            );
         };
 
 
@@ -483,6 +471,45 @@ class BBPA
             );
         };
 
+
+        //- The restart-reconstruction concern (v2 separation): the mirror
+        //  of writer -- rebuilds a binItem's components FROM the files the
+        //  writer emitted. Neither function computes a statistic; both only
+        //  invert the writer's serialisation. The checkpoint COUNTERS stay
+        //  with readCheckpoint()/write(), which orchestrate these calls.
+        //  Definitions in BBPAStateTemplates.C.
+        struct state
+        {
+            //- "bin" mode: restore the in-progress cycle's completed bins
+            //  (integ_) from the <field>_Bin / <field>_Bin_UU written before
+            //  a kill, so a restart resumes mid-cycle instead of discarding
+            //  it. Returns the number of bins recovered.
+            template<class Type>
+            static label restoreClosedBins
+            (
+                binItem<Type>& bi,
+                const fvMesh& mesh,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const scalar now,
+                const scalar centreOffset
+            );
+
+            //- Rebuild the cross-cycle ensemble (stats_) from the public
+            //  phase-aligned _PA / _PAVariance / _PA_UU files.
+            //  paSuffix must match what the writer emitted, or the restore
+            //  silently finds nothing and every bin cold-starts.
+            template<class Type>
+            static void restoreStatistics
+            (
+                binItem<Type>& bi,
+                const word& fieldName,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const word& paSuffix
+            );
+        };
+
         //- Hash tables of bin items for different field types.
         //  BBPA tracks volScalarFields (e.g. pressure) and volVectorFields
         //  (e.g. velocity, wall shear stress). Tensor-valued fields are
@@ -546,18 +573,6 @@ class BBPA
         //  internal stats_.mean_, stats_.M2_ and stats_.meanSqr_ arrays.
         //  No-op when no Properties file is found (= cold start).
         void readCheckpoint();
-
-        //- Templated helper: restore one binItem from disk.
-        //  paSuffix must match what write() emitted, or the restore silently
-        //  finds nothing and every bin cold-starts.
-        template<class Type>
-        void restoreBinItemFromDisk
-        (
-            binItem<Type>& bi,
-            const word& fieldName,
-            const scalar cycleStartTime,
-            const word& paSuffix
-        );
 
         //- Companion write: one bin (current phase) into solver's
         //  current time directory, for all tracked fields
@@ -623,6 +638,7 @@ public:
 #ifdef NoRepository
     #include "BBPATemplates.C"
     #include "BBPAWriterTemplates.C"
+    #include "BBPAStateTemplates.C"
 #endif
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
