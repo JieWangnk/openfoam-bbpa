@@ -1,0 +1,8 @@
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/CleanFunctions"
+
+cleanCase
+rm -f 0/*_PA 0/*_PA_UU 0/*_PAVariance 0/*_PAmeanState 0/*_Bin 0/*_Bin_UU
+rm -f 0/wallShearStress
+rm -rf 0/uniform

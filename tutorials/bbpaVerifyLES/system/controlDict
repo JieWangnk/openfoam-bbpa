@@ -24,11 +24,11 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         2.55;
+endTime         2.56;   // 128 x writeInterval -> the final write lands on endTime
 
 deltaT          2.5e-4;
 
-writeControl    runTime;
+writeControl    adjustableRunTime;
 
 writeInterval   0.02;
 
@@ -46,7 +46,13 @@ timePrecision   12;
 
 runTimeModifiable false;
 
-adjustTimeStep  no;
+// The one job of this case (see README.md): ADAPTIVE time stepping.
+// Steps vary with the pulsatile Courant number and straddle bin edges;
+// adjustableRunTime nudges dt so writes still land exactly on the 0.02
+// grid the phase selection derives its bins from.
+adjustTimeStep  yes;
+maxCo           0.6;
+maxDeltaT       5e-4;
 
 libs            ( "libPhaseAveraging.so" );
 
@@ -61,6 +67,13 @@ functions
         writeControl    runTime;
         writeInterval   0.02;
     }
+    // One job (see README.md): ADAPTIVE dt and second-order statistics.
+    // Steps vary and straddle bin edges; the forcing period is 0.5 (the
+    // inlet boundaryData record replayed at t -> t/2, Womersley up by
+    // sqrt(2)); the record carries a ~0.07 rms perturbation differing
+    // every cycle, so the mean, <U U> and the variance are all
+    // non-trivial. Cycle 0 is startup AND, with centred bins, its bin 0
+    // is only half covered -- discard it.
     bbpaV
     {
         type            BBPA;
@@ -68,47 +81,31 @@ functions
         executeControl  timeStep;
         executeInterval 1;
         writeControl    writeTime;
-        writeMode       bin;
-        PAwriteInterval 1;
-        fields          ( U wallShearStress );
 
-        // TURBULENT / TRANSITIONAL configuration.
-        //
-        // The inlet boundaryData record has been rescaled t -> t/2, so the
-        // forcing period is 0.5 (verified: rms mismatch of the mean waveform is
-        // 0.0034 at lag 0.5 vs 0.565 at lag 0.25). Same waveform, replayed
-        // twice as fast: omega doubles, so the Womersley number grows by
-        // sqrt(2) and the flow is more unsteady. The mesh is doubled in every
-        // direction (80 12 12 = 11520) to resolve it, and dt is halved to 5e-4
-        // to hold the Courant number (~0.57: dx is 0.833mm, a third of the
-        // previous 2.5mm, which would otherwise triple it to ~1.15).
-        //
-        // Cycle-to-cycle variation remains inlet-driven -- the record carries a
-        // ~0.07 rms perturbation that differs every cycle -- so the phase
-        // average, the second moment and the variance are all non-trivial.
-        //
-        // ON-GRID: bin width 0.005 = 10 timesteps, so every bin edge lands on a
-        // timestep. That is the production situation (the aorta's I=50 gives
-        // bin width 0.01 = its writeInterval), and it is what the phaseBin
-        // snap-then-truncate exists to make deterministic.
+        fields
+        (
+            U               { writePerCycle on; }
+            wallShearStress { writePerCycle on; }
+        );
+
         period          0.5;
         nBins           100;
+        discardCycles   1;
 
-        // Derive the tracked bins from the solver's write times instead of
-        // listing them by hand: stride = writeInterval/binWidth = 0.02/0.005 = 4,
-        // so bins 0,4,8...96 -- 25 of 100, each landing in a write folder.
-        // A hand list silently rots the moment nBins or writeInterval changes.
-        binsAtWriteTimes true;
+        // Derive the tracked bins from the solver's write times: stride =
+        // writeInterval/binWidth = 0.02/0.005 = 4, so bins 0,4,...,96 --
+        // 25 of 100, each landing in a write folder. A hand list silently
+        // rots the moment nBins or writeInterval changes. Centred bins
+        // remove the half-bin phase lag at source.
+        phaseSelection  { mode solverWriteTimes; }
+        binAlignment    centred;
 
-        // Centre each bin on its label: dir 0.02 holds the average of
-        // [0.0175, 0.0225] rather than [0.020, 0.025). Removes the half-bin
-        // phase lag at source instead of correcting for it in post-processing.
-        binCentred      true;
-
-        // Cycle 0 is startup AND, with binCentred, its bin 0 is only half
-        // covered (the run begins at t=0, but a centred bin 0 wants
-        // [-dT/2, +dT/2)). Averaging from cycle 1 sidesteps both.
-        startCycle      1;
+        output
+        {
+            layout                  both;
+            cycleWriteInterval      1;
+            meanWriteIntervalCycles 1;
+        }
     }
 }
 

@@ -31,26 +31,29 @@ libs ("libPhaseAveraging.so");
 
 functions
 {
-    // Bin-Based Phase Averaging. In "companion" mode the current phase's bin
-    // (<field>_PA, plus <field>_PA_UU and <field>_PAVariance) is written into
-    // the solver's own time directory, ALONGSIDE the instantaneous fields, so
-    // every time dir holds both U and U_PA and the output reconstructs cleanly
-    // in parallel. (writeMode "phaseAlignedDirs" instead dumps all I bins to
-    // phase-aligned dirs t_j = j*T/I -- tidy in serial, but nests under
-    // processorN/ in a decomposed run; "both" does companion + a final dump.)
+    // One job (see README.md): production-like PARALLEL operation --
+    // serial and decomposed runs must agree. layout both writes the
+    // current bin's U_PA beside the instantaneous fields at every write
+    // (binDeltaT == writeInterval, so the phase-aligned dirs ARE the
+    // solver's own) plus the per-cycle phase-aligned dump.
     BBPA
     {
         type            BBPA;
         libs            ("libPhaseAveraging.so");
         executeControl  timeStep;
         executeInterval 1;
-        writeControl    writeTime;   // write the current bin every solver write
+        writeControl    writeTime;
+
         fields          (U);
         period          1.0;         // forcing period T
-        nBins           50;          // phase bins per cycle
-        startTime       0;
-        startCycle      1;           // discard the first (transient) cycle
-        writeMode       companion;
+        nBins           50;          // binDeltaT = 0.02 = writeInterval
+        discardCycles   1;           // discard the first (transient) cycle
+
+        output
+        {
+            layout              both;
+            cycleWriteInterval  1;
+        }
     }
 
     // Instantaneous Phase Averaging: classical pointwise estimator (one sample

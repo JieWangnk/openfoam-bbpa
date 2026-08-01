@@ -23,26 +23,26 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         5;
+endTime         5;   // ~5 cycles of 0.9997 -> variance well-defined
 
 deltaT          5e-3;
 adjustTimeStep  no;
 
 writeControl    timeStep;
 
-writeInterval   1;      // EVERY step = ground-truth trajectory
+writeInterval   20;      // solver writes every 0.1; BBPA dumps once per cycle
 
 purgeWrite      0;
 
 writeFormat     ascii;
 
-writePrecision  12;
+writePrecision  7;
 
 writeCompression off;
 
 timeFormat      general;
 
-timePrecision   12;
+timePrecision   7;
 
 runTimeModifiable true;
 

@@ -5,7 +5,19 @@ src/*/lnInclude/
 *.o
 
 ## Tutorial run artifacts
+## (runtime product/checkpoint files land in the tracked 0/ dir when a bin
+##  label or companion write coincides with t=0 -- never commit them)
+tutorials/*/0/*_PA
+tutorials/*/0/*_PA_UU
+tutorials/*/0/*_PAVariance
+tutorials/*/0/*_PAmeanState
+tutorials/*/0/*_Bin
+tutorials/*/0/*_Bin_UU
+tutorials/*/0/*_BinPA*
+tutorials/*/0/wallShearStress
+tutorials/*/0/uniform/
 tutorials/*/[0-9]*/
+tutorials/*/constant/polyMesh/
 tutorials/*/processor*/
 tutorials/*/postProcessing/
 tutorials/*/log.*

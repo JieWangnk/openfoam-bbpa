@@ -22,12 +22,11 @@ boundaryField
     movingWall
     {
         type            uniformFixedValue;
-        uniformValue    sine;
-        uniformValueCoeffs
+        uniformValue
         {
+            type        sine;
             frequency   1;
             amplitude   (1 0 0);
-            scale       1;
             level       (0 0 0);
         }
     }

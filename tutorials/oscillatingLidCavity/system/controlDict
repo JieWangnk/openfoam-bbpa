@@ -52,15 +52,35 @@ functions
 {
     #includeFunc wallShearStress
 
+    // One job (see README.md): field TYPES and a DERIVED field --
+    // U (vector), p (scalar), wallShearStress (produced by its own
+    // function object above, data entirely on the wall patch) -- with
+    // per-field products: p keeps only its mean; wallShearStress keeps
+    // mean + <tau tau> (no variance); U keeps everything.
     bbpa
     {
         type            BBPA;
         libs            ("libPhaseAveraging.so");
-        fields          (U p wallShearStress);
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+
+        fields
+        (
+            U
+            p               { secondMoment off; crossCycleVariance off; }
+            wallShearStress { crossCycleVariance off; }
+        );
+
         period          1.0;
         nBins           10;
-        startCycle      0;
-        writeControl    writeTime;
+        discardCycles   0;
+
+        output
+        {
+            layout              both;   // phase-aligned dirs + companion
+            cycleWriteInterval  1;
+        }
     }
 }
 

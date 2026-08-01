@@ -2,7 +2,7 @@
   =========                 |
   \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
    \\    /   O peration     | Website:  https://openfoam.org
-    \\  /    A nd           | Version:  12
+    \\  /    A nd           | Version:  14
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 FoamFile
@@ -19,6 +19,15 @@ FoamFile
 
 // ************************************************************************* //
 
+// One job (see README.md): the cross-cycle VARIANCE and restart
+// correctness. The Waters-King startup DEVELOPS, so successive "cycles"
+// genuinely differ -> the cross-cycle variance is NON-ZERO and checkable.
+// On a perfectly periodic flow the variance is ~0 and a variance bug is
+// invisible -- which is exactly how the pre-fix pseudo-Welford survived.
+// 0.9997 is deliberately NOT a multiple of deltaT (5e-3), so no state can
+// land exactly on a cycle boundary or bin edge and the FO's internal time
+// can never disagree with the written dir name about which bin a state is
+// in.
 bbpaV
 {
     type            BBPA;
@@ -26,18 +35,20 @@ bbpaV
     executeControl  timeStep;
     executeInterval 1;
     writeControl    writeTime;
-    writeMode       perCycle;
-    fields          ( U );
-    // Waters-King startup: the flow DEVELOPS, so successive "cycles" genuinely
-    // differ -> the cross-cycle variance is NON-ZERO and can actually be
-    // verified. On a perfectly periodic flow the variance is ~0 and the Welford
-    // bug is invisible -- which is exactly how it survived in bbpaVerify.
-    // 0.9997 is deliberately NOT a multiple of deltaT (5e-3), so no state can
-    // land exactly on a cycle boundary or bin edge and the FO's internal time
-    // can never disagree with the written dir name about which bin a state is in.
+
+    fields          ( U );       // all products: mean, <U U>, variance
+
     period          0.9997;
-    nBins           7;
-    startCycle      0;
+    nBins           100;
+    discardCycles   0;
+
+    output
+    {
+        layout              phaseAligned;
+        cycleWriteInterval  1;   // a restart checkpoint at every cycle
+        writeFinal          true;
+        writeProperties     true;
+    }
 }
 
 // ************************************************************************* //
