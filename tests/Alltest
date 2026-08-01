@@ -25,6 +25,8 @@ for t in \
     test_products \
     test_restartMeta \
     test_output \
+    test_parallel \
+    test_memory \
     test_invalidInput
 do
     echo "==== $t ===="
