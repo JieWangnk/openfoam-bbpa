@@ -83,14 +83,20 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
         const scalar binTime = cycleStartTime + binI*binDeltaT;
         const word binTimeName = Time::timeName(binTime);
 
+        // Restore only the products that accumulate (allocation is the
+        // gate): with the second moment off there is no _Bin_UU on disk and
+        // no accumulator to fill. When the product is on, both files or
+        // neither -- a bin recovered with a mean but no second moment would
+        // fold a zero <UiUj> in at full weight.
+        const bool withSqr = bi.integ_.binSqrSum_.set(binI);
+
         const fileName binPath =
             mesh.time().path()/binTimeName/(bi.fieldName_ + "_Bin");
         const fileName uuPath =
             mesh.time().path()/binTimeName/(bi.fieldName_ + "_Bin_UU");
 
-        // Both files or neither: a bin recovered with a mean but no second
-        // moment would fold a zero <UiUj> in at full weight.
-        if (!Foam::isFile(binPath) || !Foam::isFile(uuPath)) continue;
+        if (!Foam::isFile(binPath)) continue;
+        if (withSqr && !Foam::isFile(uuPath)) continue;
 
         FieldType loaded
         (
@@ -106,24 +112,29 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
             mesh
         );
 
-        SqrFieldType loadedUU
-        (
-            IOobject
-            (
-                bi.fieldName_ + "_Bin_UU",
-                binTimeName,
-                mesh,
-                IOobject::MUST_READ,
-                IOobject::NO_WRITE,
-                false
-            ),
-            mesh
-        );
-
         // The files hold the bin MEANS; the accumulators hold time-weighted
         // SUMS. The bin is complete, so its weight is exactly binDeltaT.
         bi.integ_.binSum_[binI] = loaded*binDeltaT;
-        bi.integ_.binSqrSum_[binI] = loadedUU*binDeltaT;
+
+        if (withSqr)
+        {
+            SqrFieldType loadedUU
+            (
+                IOobject
+                (
+                    bi.fieldName_ + "_Bin_UU",
+                    binTimeName,
+                    mesh,
+                    IOobject::MUST_READ,
+                    IOobject::NO_WRITE,
+                    false
+                ),
+                mesh
+            );
+
+            bi.integ_.binSqrSum_[binI] = loadedUU*binDeltaT;
+        }
+
         bi.integ_.binTime_[binI] = binDeltaT;
         bi.binFlushed_[binI] = true;      // already on disk; do not rewrite
         recovered++;
@@ -181,6 +192,10 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
         const word binTimeName = Time::timeName(binTime);
 
         // 1. mean: read fieldName_PA into stats_.mean_[binI].
+        //    Only when the mean product is on: with phaseMean off no _PA
+        //    was ever written, and treating that as "checkpoint lost"
+        //    would wrongly reset the counts the OTHER products rely on.
+        if (bi.products_.mean)
         {
             IOobject paIO
             (
@@ -212,11 +227,17 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
                 bi.stats_.binCounts_[binI] = 0;
                 bi.stats_.mean_[binI] =
                     dimensioned<Type>(bi.stats_.mean_[binI].dimensions(), Zero);
-                bi.stats_.M2_[binI] =
-                    dimensionedScalar(bi.stats_.M2_[binI].dimensions(), 0);
-                bi.stats_.meanSqr_[binI] =
-                    dimensioned<typename binItem<Type>::SqrType>
-                    (bi.stats_.meanSqr_[binI].dimensions(), Zero);
+                if (bi.stats_.M2_.set(binI))
+                {
+                    bi.stats_.M2_[binI] =
+                        dimensionedScalar(bi.stats_.M2_[binI].dimensions(), 0);
+                }
+                if (bi.stats_.meanSqr_.set(binI))
+                {
+                    bi.stats_.meanSqr_[binI] =
+                        dimensioned<typename binItem<Type>::SqrType>
+                        (bi.stats_.meanSqr_[binI].dimensions(), Zero);
+                }
                 continue;
             }
 
@@ -232,8 +253,9 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
             bi.stats_.mean_[binI] = loaded;
         }
 
-        // 2. M2: read fieldName_PAVariance and rescale by (n-1).
-        if (nCyc > 1)
+        // 2. M2: read fieldName_PAVariance and rescale by (n-1)
+        //    (only when the variance product is allocated).
+        if (bi.stats_.M2_.set(binI) && nCyc > 1)
         {
             IOobject varIO
             (
@@ -254,7 +276,9 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
             }
         }
 
-        // 3. meanSqr: read fieldName_PA_UU into stats_.meanSqr_[binI].
+        // 3. meanSqr: read fieldName_PA_UU into stats_.meanSqr_[binI]
+        //    (only when the second-moment product is allocated).
+        if (bi.stats_.meanSqr_.set(binI))
         {
             IOobject uuIO
             (

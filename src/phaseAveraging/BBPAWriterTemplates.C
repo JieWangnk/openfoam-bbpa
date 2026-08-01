@@ -132,20 +132,25 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
         // rebuilds bi.integ_.binSqrSum_ from it. Without it a recovered bin
         // would carry a full bin time but a zero second moment, and
         // finalizeCycle() would fold that zero into <UiUj> as real data.
-        SqrFieldType binUU
-        (
-            IOobject
+        // (Skipped when the secondMoment product is off -- nothing
+        // accumulates, so there is nothing to persist or restore.)
+        if (bi.integ_.binSqrSum_.set(binI))
+        {
+            SqrFieldType binUU
             (
-                bi.fieldName_ + "_Bin_UU",
-                binTimeName,
-                mesh,
-                IOobject::NO_READ,
-                IOobject::NO_WRITE,
-                false
-            ),
-            bi.integ_.binSqrSum_[binI]*inv
-        );
-        writePAField(binUU, mesh, binTimeName);
+                IOobject
+                (
+                    bi.fieldName_ + "_Bin_UU",
+                    binTimeName,
+                    mesh,
+                    IOobject::NO_READ,
+                    IOobject::NO_WRITE,
+                    false
+                ),
+                bi.integ_.binSqrSum_[binI]*inv
+            );
+            writePAField(binUU, mesh, binTimeName);
+        }
 
         bi.binFlushed_[binI] = true;
     }
@@ -236,6 +241,10 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
 
             // Build the PA field values without triggering tmp<> expressions
             // on registered fields. We compute in a copy.
+            // phaseMean off suppresses only this FILE; the mean chain is
+            // still accumulated (the Welford variance needs it).
+            if (bi.products_.mean)
+            {
             FieldType paField
             (
                 IOobject
@@ -284,11 +293,12 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
             }
 
             writePAField(paField, mesh, binTimeName);
+            }
 
             binsWritten++;
 
             // Welford cycle-variance (cycle-to-cycle variability of bin mean)
-            if (bi.stats_.binCounts_[binI] > 1)
+            if (bi.stats_.M2_.set(binI) && bi.stats_.binCounts_[binI] > 1)
             {
                 volScalarField paVariance
                 (
@@ -312,8 +322,9 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
             // <U_i U_j> from which the Reynolds stress R_ij =
             // <U_i U_j> - <U_i><U_j> and TKE = 0.5*trace(R) are computed
             // offline. For scalar p this reduces to <p*p>.
-            // Fires whenever we have data (finalised or in-progress bin).
-            if (hasCrossData || hasCurrentData)
+            // Fires whenever we have data (finalised or in-progress bin)
+            // and the product is on (allocation is the gate).
+            if (bi.stats_.meanSqr_.set(binI) && (hasCrossData || hasCurrentData))
             {
                 // Construct FROM bi.stats_.meanSqr_[binI], exactly as paField is
                 // constructed from bi.stats_.mean_[binI] above. This is not a
@@ -403,6 +414,9 @@ void Foam::functionObjects::BBPA::writer::companion
 
     // Sparse-bin mode: nothing to write if the current bin is not tracked.
     if (!bi.stats_.mean_.set(binI)) return;
+
+    // The companion file IS the phase-mean product.
+    if (!bi.products_.mean) return;
 
     const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
     const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;

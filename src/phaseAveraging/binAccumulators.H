@@ -52,6 +52,39 @@ template<class T> struct bbpaSqrTypeOf { typedef T type; };
 template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
 
 
+//- Which products a field carries (v2 per-field controls). Gating is by
+//  ALLOCATION: a product that is off never allocates its accumulators, and
+//  every downstream loop (integrate, fold, write, restore) already skips
+//  unallocated bins via PtrList::set() -- the same guard sparse-bin mode
+//  uses. mean gates only the _PA FILE (the mean chain is always
+//  accumulated: the Welford variance needs it internally).
+struct binProducts
+{
+    //- Write the cross-cycle phase-mean file (_PA)
+    bool mean;
+
+    //- Accumulate + write the second moment (<phi*phi>, _PA_UU)
+    bool secondMoment;
+
+    //- Accumulate + write the cross-cycle variance (M2, _PAVariance).
+    //  Requires mean: the restart restores the mean chain FROM the _PA
+    //  file, and the Welford deltas of every post-restart fold would be
+    //  computed against a zero mean without it.
+    bool crossCycleVariance;
+
+    //- Keep + write the per-cycle bin value (_Bin; "bin" mode's capture)
+    bool writePerCycle;
+
+    binProducts()
+    :
+        mean(true),
+        secondMoment(true),
+        crossCycleVariance(true),
+        writePerCycle(false)
+    {}
+};
+
+
 /*---------------------------------------------------------------------------*\
                         Struct binIntegrator Declaration
 \*---------------------------------------------------------------------------*/
@@ -86,12 +119,17 @@ struct binIntegrator
         return binSum_.set(binI);
     }
 
-    //- One solver step's contribution to bin binI
+    //- One solver step's contribution to bin binI. The second moment
+    //  accumulates only when its bin is allocated (product on).
     void integrate(const label binI, const FieldType& field, const scalar dt)
     {
         binTime_[binI] += dt;
         binSum_[binI] += dt*field;
-        binSqrSum_[binI] += dt*sqr(field);
+
+        if (binSqrSum_.set(binI))
+        {
+            binSqrSum_[binI] += dt*sqr(field);
+        }
     }
 
     //- Zero everything for a new cycle
@@ -101,12 +139,16 @@ struct binIntegrator
 
         forAll(binSum_, binI)
         {
-            if (!binSum_.set(binI)) continue;
-
-            binSum_[binI] =
-                dimensioned<Type>(binSum_[binI].dimensions(), Zero);
-            binSqrSum_[binI] =
-                dimensioned<SqrType>(binSqrSum_[binI].dimensions(), Zero);
+            if (binSum_.set(binI))
+            {
+                binSum_[binI] =
+                    dimensioned<Type>(binSum_[binI].dimensions(), Zero);
+            }
+            if (binSqrSum_.set(binI))
+            {
+                binSqrSum_[binI] =
+                    dimensioned<SqrType>(binSqrSum_[binI].dimensions(), Zero);
+            }
         }
     }
 };

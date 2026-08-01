@@ -72,15 +72,16 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
     const fvMesh& mesh,
     const label nBins,
     const labelList& activeBins,
-    const bool keepLastCycle
+    const binProducts& prods
 )
 :
     fieldName_(name),
     integ_(nBins),
     stats_(nBins),
-    lastCycleFields_(keepLastCycle ? nBins : 0),
-    lastCycleBinTime_(keepLastCycle ? nBins : 0, 0.0),
-    binFlushed_(keepLastCycle ? nBins : 0, false)
+    lastCycleFields_(prods.writePerCycle ? nBins : 0),
+    lastCycleBinTime_(prods.writePerCycle ? nBins : 0, 0.0),
+    binFlushed_(prods.writePerCycle ? nBins : 0, false),
+    products_(prods)
 {
     // Look up field to get dimensions
     const FieldType& field = mesh.lookupObject<FieldType>(name);
@@ -123,24 +124,27 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        stats_.M2_.set
-        (
-            binI,
-            new volScalarField
+        if (prods.crossCycleVariance)
+        {
+            stats_.M2_.set
             (
-                IOobject
+                binI,
+                new volScalarField
                 (
-                    name + "_M2_bin" + Foam::name(binI),
-                    mesh.time().name(),
+                    IOobject
+                    (
+                        name + "_M2_bin" + Foam::name(binI),
+                        mesh.time().name(),
+                        mesh,
+                        IOobject::READ_IF_PRESENT,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
                     mesh,
-                    IOobject::READ_IF_PRESENT,
-                    IOobject::NO_WRITE,
-                    false
-                ),
-                mesh,
-                dimensionedScalar(sqr(field.dimensions()), Zero)
-            )
-        );
+                    dimensionedScalar(sqr(field.dimensions()), Zero)
+                )
+            );
+        }
 
         integ_.binSum_.set
         (
@@ -161,43 +165,46 @@ Foam::functionObjects::BBPA::binItem<Type>::binItem
             )
         );
 
-        stats_.meanSqr_.set
-        (
-            binI,
-            new SqrFieldType
+        if (prods.secondMoment)
+        {
+            stats_.meanSqr_.set
             (
-                IOobject
+                binI,
+                new SqrFieldType
                 (
-                    name + "_meanSqr_bin" + Foam::name(binI),
-                    mesh.time().name(),
+                    IOobject
+                    (
+                        name + "_meanSqr_bin" + Foam::name(binI),
+                        mesh.time().name(),
+                        mesh,
+                        IOobject::READ_IF_PRESENT,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
                     mesh,
-                    IOobject::READ_IF_PRESENT,
-                    IOobject::NO_WRITE,
-                    false
-                ),
-                mesh,
-                dimensioned<SqrType>(sqr(field.dimensions()), Zero)
-            )
-        );
+                    dimensioned<SqrType>(sqr(field.dimensions()), Zero)
+                )
+            );
 
-        integ_.binSqrSum_.set
-        (
-            binI,
-            new SqrFieldType
+            integ_.binSqrSum_.set
             (
-                IOobject
+                binI,
+                new SqrFieldType
                 (
-                    name + "_currentBinSqr_bin" + Foam::name(binI),
-                    mesh.time().name(),
+                    IOobject
+                    (
+                        name + "_currentBinSqr_bin" + Foam::name(binI),
+                        mesh.time().name(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
                     mesh,
-                    IOobject::NO_READ,
-                    IOobject::NO_WRITE,
-                    false
-                ),
-                mesh,
-                dimensioned<SqrType>(sqr(field.dimensions()), Zero)
-            )
-        );
+                    dimensioned<SqrType>(sqr(field.dimensions()), Zero)
+                )
+            );
+        }
 
         // Note: internal fields may appear in output dirs due to OF12
         // auto-write. This is cosmetic — they can be cleaned up with
@@ -323,8 +330,10 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
             const FieldType cycleMean =
                 integ_.binSum_[binI] / integ_.binTime_[binI];
 
-            const SqrFieldType cycleMeanSqr =
-                integ_.binSqrSum_[binI] / integ_.binTime_[binI];
+            // Products that are off never allocated their accumulators, so
+            // allocation is the gate (same guard as sparse-bin mode).
+            const bool withSqr = stats_.meanSqr_.set(binI);
+            const bool withVar = stats_.M2_.set(binI);
 
             stats_.binCounts_[binI] += 1.0;
             const scalar count = stats_.binCounts_[binI];
@@ -332,8 +341,16 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
             if (count < 1.5)
             {
                 stats_.mean_[binI] = cycleMean;
-                stats_.meanSqr_[binI] = cycleMeanSqr;
-                stats_.M2_[binI] = dimensionedScalar(stats_.M2_[binI].dimensions(), 0);
+                if (withSqr)
+                {
+                    stats_.meanSqr_[binI] =
+                        integ_.binSqrSum_[binI] / integ_.binTime_[binI];
+                }
+                if (withVar)
+                {
+                    stats_.M2_[binI] =
+                        dimensionedScalar(stats_.M2_[binI].dimensions(), 0);
+                }
             }
             else
             {
@@ -361,14 +378,24 @@ void Foam::functionObjects::BBPA::binItem<Type>::finalizeCycle
                 // on a periodic flow (every cycle identical => variance ~ 0),
                 // which is why it survived; tutorials/planarPoiseuille exercises
                 // it with a developing flow whose cycles genuinely differ.
-                stats_.M2_[binI] += bbpaInner(delta, delta2);
+                if (withVar)
+                {
+                    stats_.M2_[binI] += bbpaInner(delta, delta2);
+                }
 
                 // Running cross-cycle mean of <phi*phi>_bin. Combined
                 // with stats_.mean_ this recovers Reynolds stress
                 // R_ij = <U_i U_j> - <U_i><U_j> and TKE = 0.5 trace(R)
                 // offline from the written fields.
-                stats_.meanSqr_[binI] =
-                    (stats_.meanSqr_[binI] * (count - 1.0) + cycleMeanSqr) / count;
+                if (withSqr)
+                {
+                    const SqrFieldType cycleMeanSqr =
+                        integ_.binSqrSum_[binI] / integ_.binTime_[binI];
+
+                    stats_.meanSqr_[binI] =
+                        (stats_.meanSqr_[binI] * (count - 1.0) + cycleMeanSqr)
+                       / count;
+                }
             }
         }
     }

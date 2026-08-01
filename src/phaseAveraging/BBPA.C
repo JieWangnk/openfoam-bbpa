@@ -31,6 +31,7 @@ License
 #include "IFstream.H"
 #include "DynamicList.H"
 #include "Switch.H"
+#include "wordAndDictionary.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -86,6 +87,21 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
             continue;
         }
 
+        // Resolve this field's products from its per-field options.
+        // writePerCycle defaults to the global "bin" writeMode (which
+        // needs the per-cycle capture for every field).
+        binProducts prods;
+        {
+            const dictionary& fd = fieldOptions_[fieldName];
+            prods.mean = fd.lookupOrDefault<Switch>("phaseMean", true);
+            prods.secondMoment =
+                fd.lookupOrDefault<Switch>("secondMoment", true);
+            prods.crossCycleVariance =
+                fd.lookupOrDefault<Switch>("crossCycleVariance", true);
+            prods.writePerCycle =
+                fd.lookupOrDefault<Switch>("writePerCycle", binNaming_);
+        }
+
         if (mesh_.foundObject<volScalarField>(fieldName))
         {
             scalarBinItems_.insert
@@ -95,7 +111,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<scalar>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
+                        fieldName, mesh_, nBins_, binsOfInterest_, prods
                     )
                 )
             );
@@ -110,7 +126,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<vector>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
+                        fieldName, mesh_, nBins_, binsOfInterest_, prods
                     )
                 )
             );
@@ -450,7 +466,58 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 {
     fvMeshFunctionObject::read(dict);
 
-    dict.lookup("fields") >> fieldNames_;
+    // fields: a plain list -- fields (U p) -- or the v2 annotated form with
+    // per-field product options after any entry:
+    //     fields ( U  p { secondMoment off; crossCycleVariance off; } );
+    // Options: phaseMean, secondMoment, crossCycleVariance, writePerCycle
+    // (each a Switch; defaults in initializeBinItems()). An unknown option
+    // word aborts -- a typo must not silently keep the default.
+    fieldNames_.clear();
+    fieldOptions_.clear();
+    {
+        List<wordAndDictionary> specs(dict.lookup("fields"));
+        forAll(specs, i)
+        {
+            const word& fname = specs[i].first();
+            const dictionary& fd = specs[i].second();
+
+            forAllConstIter(dictionary, fd, iter)
+            {
+                const word& k = iter().keyword();
+                if
+                (
+                    k != "phaseMean"
+                 && k != "secondMoment"
+                 && k != "crossCycleVariance"
+                 && k != "writePerCycle"
+                )
+                {
+                    FatalErrorInFunction
+                        << "unknown per-field option '" << k << "' for field "
+                        << fname << "; valid options: phaseMean, "
+                        << "secondMoment, crossCycleVariance, writePerCycle."
+                        << exit(FatalError);
+                }
+            }
+
+            if
+            (
+                fd.lookupOrDefault<Switch>("crossCycleVariance", true)
+             && !fd.lookupOrDefault<Switch>("phaseMean", true)
+            )
+            {
+                FatalErrorInFunction
+                    << "field " << fname << ": crossCycleVariance requires "
+                    << "phaseMean -- the restart restores the mean chain "
+                    << "from the _PA file, and every post-restart Welford "
+                    << "fold would otherwise run against a zero mean."
+                    << exit(FatalError);
+            }
+
+            fieldNames_.append(fname);
+            fieldOptions_.set(fname, fd);
+        }
+    }
     dict.lookup("period") >> period_;
     nBins_ = dict.lookupOrDefault("nBins", 100);
 

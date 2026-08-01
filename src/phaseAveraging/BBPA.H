@@ -77,6 +77,14 @@ class BBPA
         //- Fields to average
         wordList fieldNames_;
 
+        //- Per-field product options (v2): the optional dictionary after
+        //  each entry in
+        //      fields ( U { secondMoment off; } p );
+        //  keyed by field name; a missing/empty dictionary keeps every
+        //  product at its default. Resolved to a binProducts when the
+        //  field's binItem is created.
+        HashTable<dictionary> fieldOptions_;
+
         //- Period of oscillation
         scalar period_;
 
@@ -362,20 +370,27 @@ class BBPA
             //  written as the bin closes instead of all at once afterwards.
             boolList binFlushed_;
 
+            //- Which products this field carries (v2 per-field controls).
+            //  Off products never allocate their accumulators, so the
+            //  PtrList::set() guards gate them everywhere downstream;
+            //  products_.mean additionally gates the _PA file in the writer.
+            binProducts products_;
+
             //- Construct. activeBins lists the bin indices that should
             //  allocate field-sized accumulators; an EMPTY list means
             //  "all nBins bins" (original behaviour). Non-active bins
             //  are left as null entries in the PtrLists and are skipped
             //  by accumulate()/finalizeCycle()/write().
-            //  keepLastCycle allocates lastCycleFields_ ("bin" mode). It is
-            //  opt-in because it costs one extra field per active bin.
+            //  prods selects the products: off ones are never allocated
+            //  (writePerCycle allocates lastCycleFields_, one extra field
+            //  per active bin).
             binItem
             (
                 const word& name,
                 const fvMesh& mesh,
                 const label nBins,
                 const labelList& activeBins,
-                const bool keepLastCycle = false
+                const binProducts& prods
             );
 
             void resetCurrentCycle();
