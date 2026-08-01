@@ -64,6 +64,24 @@ Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 }
 
 
+Foam::functionObjects::binProducts
+Foam::functionObjects::BBPA::resolveProducts(const word& fieldName) const
+{
+    // writePerCycle defaults to the global "bin" writeMode (which needs
+    // the per-cycle capture for every field). Must stay in step with the
+    // checkpoint signature validation, which re-resolves on restart.
+    binProducts prods;
+    const dictionary& fd = fieldOptions_[fieldName];
+    prods.writeMean = fd.lookupOrDefault<Switch>("writePhaseMean", true);
+    prods.secondMoment = fd.lookupOrDefault<Switch>("secondMoment", true);
+    prods.crossCycleVariance =
+        fd.lookupOrDefault<Switch>("crossCycleVariance", true);
+    prods.writePerCycle =
+        fd.lookupOrDefault<Switch>("writePerCycle", binNaming_);
+    return prods;
+}
+
+
 bool Foam::functionObjects::BBPA::initializeBinItems()
 {
     // Idempotent: creates binItems for fields available now that don't
@@ -87,21 +105,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
             continue;
         }
 
-        // Resolve this field's products from its per-field options.
-        // writePerCycle defaults to the global "bin" writeMode (which
-        // needs the per-cycle capture for every field).
-        binProducts prods;
-        {
-            const dictionary& fd = fieldOptions_[fieldName];
-            prods.writeMean =
-                fd.lookupOrDefault<Switch>("writePhaseMean", true);
-            prods.secondMoment =
-                fd.lookupOrDefault<Switch>("secondMoment", true);
-            prods.crossCycleVariance =
-                fd.lookupOrDefault<Switch>("crossCycleVariance", true);
-            prods.writePerCycle =
-                fd.lookupOrDefault<Switch>("writePerCycle", binNaming_);
-        }
+        const binProducts prods = resolveProducts(fieldName);
 
         if (mesh_.foundObject<volScalarField>(fieldName))
         {
@@ -417,6 +421,7 @@ Foam::functionObjects::BBPA::BBPA
     cycles_(-1),
     startCycle_(0),
     startTime_(0),
+    phaseOriginExplicit_(false),
     binDeltaT_(0),
     currentCycle_(0),
     previousCycle_(-1),
@@ -722,6 +727,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 << exit(FatalError);
         }
         startTime_ = dict.lookup<scalar>("phaseOrigin");
+        phaseOriginExplicit_ = true;
     }
     else if (dict.found("startTime"))
     {
@@ -730,9 +736,11 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             << "for the cycle phase origin ('startTime' collides with the "
             << "standard function-object scheduling entry)." << endl;
         startTime_ = dict.lookup<scalar>("startTime");
+        phaseOriginExplicit_ = true;
     }
     else
     {
+        phaseOriginExplicit_ = false;
         startTime_ = std::floor(time_.value() / period_) * period_;
     }
 
@@ -1165,11 +1173,26 @@ bool Foam::functionObjects::BBPA::write()
             )
         );
 
+        // Configuration signature (v2 step 8): everything that fixes the
+        // accumulators' shape and meaning. validateCheckpoint() compares
+        // this against the dictionary on restart and aborts on any change
+        // that would silently corrupt or misinterpret the restored state.
+        propsDict.add("formatVersion", 2);
+        propsDict.add("period", period_);
+        propsDict.add("nBins", nBins_);
+        propsDict.add
+        (
+            "binAlignment", word(binCentred_ ? "centred" : "left")
+        );
+        propsDict.add("selectedBins", binsOfInterest_);
+
         propsDict.add("startTime", startTime_);
         propsDict.add("currentCycle", currentCycle_);
         propsDict.add("previousCycle", previousCycle_);
+        propsDict.add("currentBin", currentBin_);
 
-        // Per-field counters
+        // Per-field counters + per-field signature (type, products, the
+        // in-progress cycle's bin weights and whether one is present)
         forAllConstIter
         (
             HashTable<autoPtr<binItem<scalar>>>,
@@ -1178,8 +1201,31 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
+            fieldDict.add("type", word("scalar"));
             fieldDict.add("nCycles", iter()->stats_.nCycles_);
             fieldDict.add("binCounts", iter()->stats_.binCounts_);
+            fieldDict.add
+            (
+                "writePhaseMean", Switch(iter()->products_.writeMean)
+            );
+            fieldDict.add
+            (
+                "secondMoment", Switch(iter()->products_.secondMoment)
+            );
+            fieldDict.add
+            (
+                "crossCycleVariance",
+                Switch(iter()->products_.crossCycleVariance)
+            );
+            fieldDict.add
+            (
+                "writePerCycle", Switch(iter()->products_.writePerCycle)
+            );
+            fieldDict.add("binWeights", iter()->integ_.binTime_);
+            fieldDict.add
+            (
+                "partialCycle", Switch(sum(iter()->integ_.binTime_) > 0)
+            );
             propsDict.add(iter.key(), fieldDict);
         }
         forAllConstIter
@@ -1190,14 +1236,224 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
+            fieldDict.add("type", word("vector"));
             fieldDict.add("nCycles", iter()->stats_.nCycles_);
             fieldDict.add("binCounts", iter()->stats_.binCounts_);
+            fieldDict.add
+            (
+                "writePhaseMean", Switch(iter()->products_.writeMean)
+            );
+            fieldDict.add
+            (
+                "secondMoment", Switch(iter()->products_.secondMoment)
+            );
+            fieldDict.add
+            (
+                "crossCycleVariance",
+                Switch(iter()->products_.crossCycleVariance)
+            );
+            fieldDict.add
+            (
+                "writePerCycle", Switch(iter()->products_.writePerCycle)
+            );
+            fieldDict.add("binWeights", iter()->integ_.binTime_);
+            fieldDict.add
+            (
+                "partialCycle", Switch(sum(iter()->integ_.binTime_) > 0)
+            );
             propsDict.add(iter.key(), fieldDict);
         }
         propsDict.regIOobject::write();
     }
 
     return true;
+}
+
+
+void Foam::functionObjects::BBPA::validateCheckpoint
+(
+    const dictionary& propsDict
+) const
+{
+    const label fmt = propsDict.lookupOrDefault<label>("formatVersion", 1);
+
+    if (fmt > 2)
+    {
+        FatalErrorInFunction
+            << "checkpoint formatVersion " << fmt << " is newer than this "
+            << "build understands (2). Restart with a matching build, or "
+            << "cold-start by removing the checkpoint."
+            << exit(FatalError);
+    }
+
+    if (fmt < 2)
+    {
+        WarningInFunction
+            << "checkpoint carries no configuration signature (written by "
+            << "an older build); strict restart validation skipped for "
+            << "this restart. The next checkpoint will carry one." << endl;
+        return;
+    }
+
+    // ---- accumulator-shape entries: any change aborts --------------------
+
+    const scalar ckPeriod = propsDict.lookup<scalar>("period");
+    if (mag(ckPeriod - period_) > 1e-9*mag(ckPeriod))
+    {
+        FatalErrorInFunction
+            << "'period' changed across the restart: checkpoint has "
+            << ckPeriod << ", dictionary has " << period_ << ". The bins "
+            << "of the restored state mean different phases. Keep the "
+            << "period, or cold-start."
+            << exit(FatalError);
+    }
+
+    const label ckNBins = propsDict.lookup<label>("nBins");
+    if (ckNBins != nBins_)
+    {
+        FatalErrorInFunction
+            << "'nBins' changed across the restart: checkpoint has "
+            << ckNBins << ", dictionary has " << nBins_ << ". The restored "
+            << "accumulators have the checkpoint's shape. Keep nBins, or "
+            << "cold-start."
+            << exit(FatalError);
+    }
+
+    const word ckAlign(propsDict.lookup("binAlignment"));
+    const word nowAlign(binCentred_ ? "centred" : "left");
+    if (ckAlign != nowAlign)
+    {
+        FatalErrorInFunction
+            << "'binAlignment' changed across the restart: checkpoint has "
+            << ckAlign << ", dictionary has " << nowAlign << ". Every "
+            << "restored bin would shift half a bin in phase. Keep the "
+            << "alignment, or cold-start."
+            << exit(FatalError);
+    }
+
+    labelList ckBins(propsDict.lookup("selectedBins"));
+    if (ckBins != binsOfInterest_)
+    {
+        FatalErrorInFunction
+            << "the phase selection changed across the restart: checkpoint "
+            << "tracked bins " << ckBins << ", dictionary selects "
+            << binsOfInterest_ << " (empty = all). The restored state has "
+            << "no data for newly selected bins. Keep the selection, or "
+            << "cold-start."
+            << exit(FatalError);
+    }
+
+    if (phaseOriginExplicit_)
+    {
+        const scalar ckOrigin = propsDict.lookup<scalar>("startTime");
+        if (mag(ckOrigin - startTime_) > 1e-9*max(scalar(1), mag(ckOrigin)))
+        {
+            FatalErrorInFunction
+                << "the explicit phase origin changed across the restart: "
+                << "checkpoint has " << ckOrigin << ", dictionary gives "
+                << startTime_ << ". Every restored bin would be relabelled "
+                << "to a different phase. Keep the origin (or omit it to "
+                << "adopt the checkpoint's), or cold-start."
+                << exit(FatalError);
+        }
+    }
+
+    // ---- fields: removal aborts; per-field product expansion aborts ------
+
+    forAllConstIter(dictionary, propsDict, iter)
+    {
+        if (!iter().isDict()) continue;
+        const word& fname = iter().keyword();
+        if (findIndex(fieldNames_, fname) < 0)
+        {
+            FatalErrorInFunction
+                << "field '" << fname << "' has checkpoint state but is no "
+                << "longer in the 'fields' list. Removing a field discards "
+                << "its accumulated cycles. Keep the field, or cold-start."
+                << exit(FatalError);
+        }
+    }
+
+    forAll(fieldNames_, i)
+    {
+        const word& fname = fieldNames_[i];
+        if (!propsDict.found(fname))
+        {
+            // A field that never registered before the checkpoint (e.g. a
+            // derived field the producing FO had not created yet) has no
+            // state; it cold-starts, which loses nothing it ever had.
+            WarningInFunction
+                << "field '" << fname << "' has no checkpoint state and "
+                << "will cold-start." << endl;
+            continue;
+        }
+        const dictionary& fd = propsDict.subDict(fname);
+        const binProducts now = resolveProducts(fname);
+
+        // type must not change (checked when the item already exists)
+        const word ckType(fd.lookupOrDefault<word>("type", word::null));
+        word nowType(word::null);
+        if (scalarBinItems_.found(fname)) nowType = "scalar";
+        else if (vectorBinItems_.found(fname)) nowType = "vector";
+        if
+        (
+            ckType != word::null && nowType != word::null
+         && ckType != nowType
+        )
+        {
+            FatalErrorInFunction
+                << "field '" << fname << "' changed type across the "
+                << "restart: checkpoint has " << ckType << ", the registry "
+                << "now has " << nowType << "."
+                << exit(FatalError);
+        }
+
+        // products: ON where the checkpoint had OFF means state that was
+        // never accumulated -- abort. OFF where it had ON only discards.
+        const struct { const char* name; bool ck; bool cur; } prods[] =
+        {
+            {
+                "writePhaseMean",
+                fd.lookupOrDefault<Switch>("writePhaseMean", true),
+                now.writeMean
+            },
+            {
+                "secondMoment",
+                fd.lookupOrDefault<Switch>("secondMoment", true),
+                now.secondMoment
+            },
+            {
+                "crossCycleVariance",
+                fd.lookupOrDefault<Switch>("crossCycleVariance", true),
+                now.crossCycleVariance
+            },
+            {
+                "writePerCycle",
+                fd.lookupOrDefault<Switch>("writePerCycle", true),
+                now.writePerCycle
+            }
+        };
+
+        for (const auto& p : prods)
+        {
+            if (p.cur && !p.ck)
+            {
+                FatalErrorInFunction
+                    << "field '" << fname << "': product '" << p.name
+                    << "' turned ON across the restart, but the checkpoint "
+                    << "never accumulated it -- its history cannot be "
+                    << "reconstructed. Keep it off, or cold-start."
+                    << exit(FatalError);
+            }
+            if (!p.cur && p.ck)
+            {
+                WarningInFunction
+                    << "field '" << fname << "': product '" << p.name
+                    << "' turned off across the restart; its accumulated "
+                    << "state is discarded." << endl;
+            }
+        }
+    }
 }
 
 
@@ -1271,6 +1527,14 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         return;
     }
     dictionary propsDict(propsFile);
+
+    // Strict restart-metadata validation (v2 step 8): abort before any
+    // state is restored if the configuration no longer matches the
+    // checkpoint's signature. Once per restart.
+    if (!countersRestored_)
+    {
+        validateCheckpoint(propsDict);
+    }
 
     // Scalar counters.  Phase origin always taken from the checkpoint:
     // a manual dict override after a restart would desynchronise the

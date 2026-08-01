@@ -112,6 +112,12 @@ class BBPA
         //- Start time for phase averaging
         scalar startTime_;
 
+        //- Was the phase origin given explicitly (phaseOrigin/startTime
+        //  entry) rather than auto-derived? An explicit origin that
+        //  contradicts the checkpoint's is a restart-metadata abort; an
+        //  auto-derived one adopts the checkpoint's silently.
+        bool phaseOriginExplicit_;
+
         //- Time step size for bins
         scalar binDeltaT_;
 
@@ -589,6 +595,23 @@ class BBPA
         //  internal stats_.mean_, stats_.M2_ and stats_.meanSqr_ arrays.
         //  No-op when no Properties file is found (= cold start).
         void readCheckpoint();
+
+        //- Resolve a field's per-field product options to a binProducts
+        //  (defaults: everything on; writePerCycle defaults to the "bin"
+        //  writeMode). Used by initializeBinItems() and the checkpoint
+        //  signature validation, which must agree.
+        binProducts resolveProducts(const word& fieldName) const;
+
+        //- Strict restart-metadata validation (v2 step 8): compare the
+        //  checkpoint's configuration signature against the current
+        //  dictionary and ABORT on any change that alters accumulator
+        //  shape or meaning -- period, explicit phase origin, nBins,
+        //  binAlignment, the phase selection, a removed field, or a
+        //  product turned ON whose state was never accumulated. A product
+        //  turned OFF only warns (state is discarded, nothing corrupts).
+        //  Checkpoints without a signature (formatVersion < 2) restart
+        //  with a warning and no strict validation, for one release.
+        void validateCheckpoint(const dictionary& propsDict) const;
 
         //- Companion write: one bin (current phase) into solver's
         //  current time directory, for all tracked fields
