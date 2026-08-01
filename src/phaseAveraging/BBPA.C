@@ -495,21 +495,56 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     cycles_ = dict.lookupOrDefault("cycles", -1);
     startCycle_ = dict.lookupOrDefault("startCycle", 0);
 
+    if (fieldNames_.empty())
+    {
+        FatalErrorInFunction
+            << "'fields' is empty; give at least one field to phase-average, "
+            << "e.g. fields (U)."
+            << exit(FatalError);
+    }
+
+    if (period_ <= 0)
+    {
+        FatalErrorInFunction
+            << "'period' must be positive; got " << period_
+            << ". Set it to the cycle period in seconds."
+            << exit(FatalError);
+    }
+
+    if (nBins_ <= 0)
+    {
+        FatalErrorInFunction
+            << "'nBins' must be positive; got " << nBins_
+            << ". It is the number of phase bins per period."
+            << exit(FatalError);
+    }
+
     // Optional sparse-bin mode: only track the listed bin indices.
     // Default empty list = track all nBins_ bins (original behaviour).
     binsOfInterest_ =
         dict.lookupOrDefault<labelList>("binsOfInterest", labelList());
 
-    // Validate any supplied bin indices against [0, nBins_).
-    forAll(binsOfInterest_, k)
+    // Validate any supplied bin indices against [0, nBins_), rejecting
+    // duplicates (a duplicate would double-account that bin's statistics).
     {
-        const label b = binsOfInterest_[k];
-        if (b < 0 || b >= nBins_)
+        labelHashSet seen;
+        forAll(binsOfInterest_, k)
         {
-            FatalErrorInFunction
-                << "binsOfInterest entry " << b
-                << " is out of range [0," << nBins_ << ")"
-                << exit(FatalError);
+            const label b = binsOfInterest_[k];
+            if (b < 0 || b >= nBins_)
+            {
+                FatalErrorInFunction
+                    << "binsOfInterest entry " << b
+                    << " is out of range [0," << nBins_ << ")"
+                    << exit(FatalError);
+            }
+            if (!seen.insert(b))
+            {
+                FatalErrorInFunction
+                    << "binsOfInterest entry " << b
+                    << " is listed more than once; give each bin index once."
+                    << exit(FatalError);
+            }
         }
     }
 
@@ -520,6 +555,24 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     (
         "writeMode", word("phaseAlignedDirs")
     );
+
+    // A misspelt writeMode must not silently fall through to the default
+    // layout: the write() dispatch treats every unknown word as
+    // "phaseAlignedDirs".
+    if
+    (
+        writeMode_ != "phaseAlignedDirs"
+     && writeMode_ != "perCycle"
+     && writeMode_ != "companion"
+     && writeMode_ != "both"
+     && writeMode_ != "bin"
+    )
+    {
+        FatalErrorInFunction
+            << "unknown writeMode '" << writeMode_ << "'; valid values: "
+            << "phaseAlignedDirs, perCycle, companion, both, bin."
+            << exit(FatalError);
+    }
 
     // "bin" mode: <field>_Bin / _BinPA / _BinPA_UU / _BinPAVariance naming,
     // plus the extra per-cycle _Bin file. Everything else behaves as
@@ -756,6 +809,41 @@ bool Foam::functionObjects::BBPA::execute()
     // Check if within averaging cycle limit
     if (cycles_ > 0 && currentCycle_ >= (startCycle_ + cycles_))
     {
+        // The final averaged cycle completes exactly at this boundary, and
+        // the transition block below (which normally finalises the previous
+        // cycle on the first step of the next one) is no longer reached.
+        // Finalise it once here, or it stays stranded in the current-cycle
+        // accumulators and "cycles N" silently delivers an (N-1)-cycle
+        // ensemble. One-shot: previousCycle_ is moved past the limit after.
+        if
+        (
+            previousCycle_ >= startCycle_
+         && previousCycle_ < (startCycle_ + cycles_)
+        )
+        {
+            if (binNaming_)
+            {
+                flushCurrentCycleBins(previousCycle_);
+            }
+
+            const label skip =
+                (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
+
+            finalizeAllForCycle(skip);
+
+            if (skip >= 0)
+            {
+                straddledBin_ = -1;
+                straddledCycle_ = -1;
+            }
+
+            resetAllBinsForNewCycle();
+            previousCycle_ = currentCycle_;
+
+            Info<< "Cycle limit reached: " << cycles_
+                << " cycles averaged; accumulation stopped" << endl;
+        }
+
         return true;
     }
 

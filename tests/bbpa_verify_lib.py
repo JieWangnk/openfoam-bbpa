@@ -179,9 +179,20 @@ def coded_fo(kind, logpath, cstep=None):
 """
 
 
-def bbpa_fo(extra=""):
+def bbpa_fo(extra="", body=None):
     """The BBPA FO dict.  `extra` appends raw dict lines (e.g.
-    'writeMode bin;\\n        PAwriteInterval 2;') for option-matrix tests."""
+    'writeMode bin;\\n        PAwriteInterval 2;') for option-matrix tests.
+    `body`, when given, REPLACES the default entries entirely (negative tests
+    that omit required entries or set invalid values)."""
+    if body is not None:
+        return f"""
+    bbpa
+    {{
+        type            BBPA;
+        libs            ("libPhaseAveraging.so");
+{body}
+    }}
+"""
     return f"""
     bbpa
     {{
@@ -201,7 +212,8 @@ def bbpa_fo(extra=""):
 
 
 def control_dict(kind, dt, end_time, write_interval, start_from, logpath,
-                 start_time=0.0, cstep=None, bbpa_extra="", extra_fo=""):
+                 start_time=0.0, cstep=None, bbpa_extra="", extra_fo="",
+                 bbpa_body=None):
     return f"""/*--------------------------------*- C++ -*----------------------------------*/
 FoamFile
 {{
@@ -235,7 +247,7 @@ adjustTimeStep  no;
 functions
 {{
 {coded_fo(kind, logpath, cstep)}
-{bbpa_fo(bbpa_extra)}
+{bbpa_fo(bbpa_extra, bbpa_body)}
 {extra_fo}
 }}
 
@@ -253,7 +265,7 @@ def sh(cmd, cwd):
 
 
 def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
-              cstep=None, bbpa_extra="", extra_fo=""):
+              cstep=None, bbpa_extra="", extra_fo="", bbpa_body=None):
     rundir = os.path.join(RUNROOT, name)
     if os.path.exists(rundir):
         shutil.rmtree(rundir)
@@ -264,7 +276,7 @@ def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
     with open(os.path.join(rundir, "system", "controlDict"), "w") as f:
         f.write(control_dict(kind, dt, end_time, write_interval, start_from,
                              logpath, cstep=cstep, bbpa_extra=bbpa_extra,
-                             extra_fo=extra_fo))
+                             extra_fo=extra_fo, bbpa_body=bbpa_body))
     return rundir, logpath
 
 
