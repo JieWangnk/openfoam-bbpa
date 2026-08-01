@@ -77,13 +77,13 @@ def run_rows():
     errors = []
 
     # -- startCycle 2: ensemble = cycles 2..5 --------------------------------
-    rd, _ = _run("opt_startCycle", "startCycle      2;")
+    rd, _ = _run("opt_startCycle", "discardCycles   2;")
     got = rv.read_bbpa_output(rd, rv.latest_cycle_start(rd))
     closed = bo.closed_form_bin_constant(rv.A, lambda n: rv.c_of_n(n + 2), 4)
     _check_ensemble("startCycle", got, closed, errors)
 
     # -- cycles 3: exactly cycles 0,1,2; frozen thereafter -------------------
-    rd, _ = _run("opt_cycles", "cycles          3;")
+    rd, _ = _run("opt_cycles", "maxCycles       3;")
     cs = rv.latest_cycle_start(rd)
     got = rv.read_bbpa_output(rd, cs)
     closed = bo.closed_form_bin_constant(rv.A, rv.c_of_n, 3)
@@ -94,7 +94,7 @@ def run_rows():
 
     # -- PAwriteInterval 2 (bin mode): cadence of _BinPA vs _Bin -------------
     rd, _ = _run("opt_pawi2",
-                 "writeMode       bin;\n        PAwriteInterval 2;")
+                 "writeMode       bin;\n        meanWriteIntervalCycles 2;")
     # final dump (currentCycle 6, even; also last write): full _BinPA set
     got = rv.read_bbpa_output(rd, FINAL_CS, suffix="_BinPA")
     closed = bo.closed_form_bin_constant(rv.A, rv.c_of_n, 6)
@@ -111,7 +111,7 @@ def run_rows():
 
     # -- PAwriteInterval 0: _BinPA only at the final write -------------------
     rd, _ = _run("opt_pawi0",
-                 "writeMode       bin;\n        PAwriteInterval 0;")
+                 "writeMode       bin;\n        meanWriteIntervalCycles 0;")
     got = rv.read_bbpa_output(rd, FINAL_CS, suffix="_BinPA")
     _check_ensemble("PAwriteInterval0-final", got, closed, errors)
     for cs_early in (3.0, 4.0):
@@ -120,7 +120,8 @@ def run_rows():
             errors.append(f"PAwriteInterval0: U_BinPA written early (cs {cs_early})")
 
     # -- sparse binsOfInterest (2 5): only those bins, same numbers ----------
-    rd, _ = _run("opt_sparse", "binsOfInterest  (2 5);")
+    rd, _ = _run("opt_sparse",
+                 "phaseSelection { mode list; bins (2 5); }")
     got = rv.read_bbpa_output(rd, FINAL_CS)
     _check_ensemble("sparse", got, closed, errors, bins=(2, 5))
     for j in range(rv.I):

@@ -21,6 +21,7 @@ for t in \
     test_restart \
     test_variableDt \
     test_options \
+    test_dictNames \
     test_invalidInput
 do
     echo "==== $t ===="

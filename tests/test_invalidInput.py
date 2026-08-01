@@ -105,6 +105,20 @@ ROWS = [
     ("incommensurate_binsAtWriteTimes",
      BASE + "        binsAtWriteTimes yes;\n",
      "integer multiple", 0.3),      # 0.3 / (1/8) is not an integer
+    # --- step-6 rename rows ---
+    ("old_and_new_name_conflict",
+     BASE + "        discardCycles 1;\n        startCycle 1;\n",
+     "deprecated spelling", 1.0),
+    ("unknown_phaseSelection_mode",
+     BASE + "        phaseSelection { mode everything; }\n",
+     "unknown phaseSelection mode", 1.0),
+    ("phaseSelection_and_old_bins",
+     BASE + "        phaseSelection { mode list; bins (2); }\n"
+            "        binsOfInterest (2);\n",
+     "not both", 1.0),
+    ("unknown_binAlignment",
+     BASE + "        binAlignment middle;\n",
+     "unknown binAlignment", 1.0),
 ]
 
 

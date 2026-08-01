@@ -201,8 +201,8 @@ def bbpa_fo(extra="", body=None):
         fields          (U);
         period          {_f(T)};
         nBins           {I};
-        startCycle      0;
-        startTime       0;
+        discardCycles   0;
+        phaseOrigin     0;
         executeControl  timeStep;
         executeInterval 1;
         writeControl    writeTime;

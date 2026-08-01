@@ -453,8 +453,43 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     dict.lookup("fields") >> fieldNames_;
     dict.lookup("period") >> period_;
     nBins_ = dict.lookupOrDefault("nBins", 100);
-    cycles_ = dict.lookupOrDefault("cycles", -1);
-    startCycle_ = dict.lookupOrDefault("startCycle", 0);
+
+    // v2 names, with one release of compatibility for the deprecated ones.
+    // Each old name still works alone (with a warning); giving old and new
+    // together is ambiguous and aborts.
+
+    // maxCycles (deprecated: cycles) -- stop after N completed cycles
+    cycles_ = dict.lookupOrDefault("maxCycles", -1);
+    if (dict.found("cycles"))
+    {
+        if (dict.found("maxCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'maxCycles' and its deprecated spelling 'cycles' "
+                << "given; keep only 'maxCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'cycles' is deprecated; use 'maxCycles'." << endl;
+        cycles_ = dict.lookup<label>("cycles");
+    }
+
+    // discardCycles (deprecated: startCycle) -- skip the first N cycles
+    startCycle_ = dict.lookupOrDefault("discardCycles", 0);
+    if (dict.found("startCycle"))
+    {
+        if (dict.found("discardCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'discardCycles' and its deprecated spelling "
+                << "'startCycle' given; keep only 'discardCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'startCycle' is deprecated; use 'discardCycles'."
+            << endl;
+        startCycle_ = dict.lookup<label>("startCycle");
+    }
 
     if (fieldNames_.empty())
     {
@@ -480,10 +515,62 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             << exit(FatalError);
     }
 
-    // Optional sparse-bin mode: only track the listed bin indices.
-    // Default empty list = track all nBins_ bins (original behaviour).
-    binsOfInterest_ =
-        dict.lookupOrDefault<labelList>("binsOfInterest", labelList());
+    // Phase selection: which bins are tracked.
+    //   phaseSelection { mode all; }                     all nBins (default)
+    //   phaseSelection { mode list; bins (2 5); }        sparse-bin mode
+    //   phaseSelection { mode solverWriteTimes; }        bins derived from
+    //                                                    the solver's writes
+    // Deprecated spellings (one release): binsOfInterest (= mode list),
+    // binsAtWriteTimes (= mode solverWriteTimes).
+    binsOfInterest_.clear();
+    binsAtWriteTimes_ = false;
+    if (dict.found("phaseSelection"))
+    {
+        if (dict.found("binsOfInterest") || dict.found("binsAtWriteTimes"))
+        {
+            FatalErrorInFunction
+                << "give either 'phaseSelection' or the deprecated "
+                << "'binsOfInterest'/'binsAtWriteTimes' entries, not both."
+                << exit(FatalError);
+        }
+
+        const dictionary& ps = dict.subDict("phaseSelection");
+        const word mode(ps.lookupOrDefault<word>("mode", word("all")));
+
+        if (mode == "list")
+        {
+            binsOfInterest_ = ps.lookup<labelList>("bins");
+        }
+        else if (mode == "solverWriteTimes")
+        {
+            binsAtWriteTimes_ = true;
+        }
+        else if (mode != "all")
+        {
+            FatalErrorInFunction
+                << "unknown phaseSelection mode '" << mode
+                << "'; valid values: all, list, solverWriteTimes."
+                << exit(FatalError);
+        }
+    }
+    else
+    {
+        if (dict.found("binsOfInterest"))
+        {
+            WarningInFunction
+                << "BBPA entry 'binsOfInterest' is deprecated; use "
+                << "phaseSelection { mode list; bins (...); }." << endl;
+            binsOfInterest_ = dict.lookup<labelList>("binsOfInterest");
+        }
+        if (dict.found("binsAtWriteTimes"))
+        {
+            WarningInFunction
+                << "BBPA entry 'binsAtWriteTimes' is deprecated; use "
+                << "phaseSelection { mode solverWriteTimes; }." << endl;
+            binsAtWriteTimes_ =
+                dict.lookup<Switch>("binsAtWriteTimes");
+        }
+    }
 
     // Validate any supplied bin indices against [0, nBins_), rejecting
     // duplicates (a duplicate would double-account that bin's statistics).
@@ -542,13 +629,49 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 
     // How often the cross-cycle _BinPA* files are written, in completed
     // cycles. The per-cycle _Bin file is always written.
-    paWriteInterval_ = dict.lookupOrDefault<label>("PAwriteInterval", 1);
+    // meanWriteIntervalCycles (deprecated: PAwriteInterval)
+    paWriteInterval_ =
+        dict.lookupOrDefault<label>("meanWriteIntervalCycles", 1);
+    if (dict.found("PAwriteInterval"))
+    {
+        if (dict.found("meanWriteIntervalCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'meanWriteIntervalCycles' and its deprecated "
+                << "spelling 'PAwriteInterval' given; keep only "
+                << "'meanWriteIntervalCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'PAwriteInterval' is deprecated; use "
+            << "'meanWriteIntervalCycles'." << endl;
+        paWriteInterval_ = dict.lookup<label>("PAwriteInterval");
+    }
 
 
     // Phase origin: explicit override or auto-align to nearest
     // cycle boundary at or before the current time.
-    if (dict.found("startTime"))
+    // phaseOrigin (deprecated: startTime). The rename matters more here
+    // than for the other entries: 'startTime' is ALSO the standard
+    // function-object scheduling entry (when execution begins), so the
+    // same word meant two different things in one dictionary.
+    if (dict.found("phaseOrigin"))
     {
+        if (dict.found("startTime"))
+        {
+            FatalErrorInFunction
+                << "both 'phaseOrigin' and its deprecated spelling "
+                << "'startTime' given; keep only 'phaseOrigin'."
+                << exit(FatalError);
+        }
+        startTime_ = dict.lookup<scalar>("phaseOrigin");
+    }
+    else if (dict.found("startTime"))
+    {
+        WarningInFunction
+            << "BBPA entry 'startTime' is deprecated; use 'phaseOrigin' "
+            << "for the cycle phase origin ('startTime' collides with the "
+            << "standard function-object scheduling entry)." << endl;
         startTime_ = dict.lookup<scalar>("startTime");
     }
     else
@@ -558,10 +681,41 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 
     binDeltaT_ = period_/nBins_;
 
-    // "bin" mode conveniences: derive the tracked bins from the solver's write
-    // times, and centre each bin's window on its label.
-    binsAtWriteTimes_ = dict.lookupOrDefault<Switch>("binsAtWriteTimes", false);
-    binCentred_ = dict.lookupOrDefault<Switch>("binCentred", false);
+    // Bin alignment: where a bin's integration window sits relative to its
+    // label. binAlignment left (default) starts the window at the label;
+    // binAlignment centred centres it there (removing the half-bin phase
+    // lag). Deprecated spelling (one release): binCentred yes/no.
+    // (binsAtWriteTimes_ itself was resolved by the phaseSelection block.)
+    binCentred_ = false;
+    if (dict.found("binAlignment"))
+    {
+        if (dict.found("binCentred"))
+        {
+            FatalErrorInFunction
+                << "both 'binAlignment' and its deprecated spelling "
+                << "'binCentred' given; keep only 'binAlignment'."
+                << exit(FatalError);
+        }
+        const word a(dict.lookup("binAlignment"));
+        if (a == "centred")
+        {
+            binCentred_ = true;
+        }
+        else if (a != "left")
+        {
+            FatalErrorInFunction
+                << "unknown binAlignment '" << a
+                << "'; valid values: left, centred."
+                << exit(FatalError);
+        }
+    }
+    else if (dict.found("binCentred"))
+    {
+        WarningInFunction
+            << "BBPA entry 'binCentred' is deprecated; use "
+            << "'binAlignment centred;' (or 'left')." << endl;
+        binCentred_ = dict.lookup<Switch>("binCentred");
+    }
 
     if (binsAtWriteTimes_)
     {
