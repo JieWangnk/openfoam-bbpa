@@ -371,9 +371,10 @@ class BBPA
             boolList binFlushed_;
 
             //- Which products this field carries (v2 per-field controls).
-            //  Off products never allocate their accumulators, so the
-            //  PtrList::set() guards gate them everywhere downstream;
-            //  products_.mean additionally gates the _PA file in the writer.
+            //  Off calculation products never allocate their accumulators,
+            //  so the PtrList::set() guards gate them everywhere downstream;
+            //  products_.writeMean gates only the _PA file in the writer
+            //  (the mean itself always accumulates).
             binProducts products_;
 
             //- Construct. activeBins lists the bin indices that should

@@ -52,32 +52,39 @@ template<class T> struct bbpaSqrTypeOf { typedef T type; };
 template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
 
 
-//- Which products a field carries (v2 per-field controls). Gating is by
-//  ALLOCATION: a product that is off never allocates its accumulators, and
-//  every downstream loop (integrate, fold, write, restore) already skips
-//  unallocated bins via PtrList::set() -- the same guard sparse-bin mode
-//  uses. mean gates only the _PA FILE (the mean chain is always
-//  accumulated: the Welford variance needs it internally).
+//- Which products a field carries (v2 per-field controls).
+//
+//  Calculation options gate by ALLOCATION: a product that is off never
+//  allocates its accumulators, and every downstream loop (integrate, fold,
+//  write, restore) already skips unallocated bins via PtrList::set() --
+//  the same guard sparse-bin mode uses.
+//
+//  writePhaseMean is deliberately an OUTPUT option, named so: the running
+//  phase mean is ALWAYS accumulated (it is the core quantity, and the
+//  Welford variance folds against it), so this switch controls only
+//  whether the _PA file is emitted. With writePhaseMean off and
+//  crossCycleVariance on, the writer persists the mean as the
+//  checkpoint-only <field><suffix>meanState file instead -- the restart
+//  needs the mean chain regardless of whether the user wants the file.
 struct binProducts
 {
-    //- Write the cross-cycle phase-mean file (_PA)
-    bool mean;
+    //- OUTPUT: write the cross-cycle phase-mean file (_PA). The mean
+    //  itself always accumulates.
+    bool writeMean;
 
-    //- Accumulate + write the second moment (<phi*phi>, _PA_UU)
+    //- CALCULATION: accumulate the second moment (<phi*phi>) and write
+    //  _PA_UU / _Bin_UU
     bool secondMoment;
 
-    //- Accumulate + write the cross-cycle variance (M2, _PAVariance).
-    //  Requires mean: the restart restores the mean chain FROM the _PA
-    //  file, and the Welford deltas of every post-restart fold would be
-    //  computed against a zero mean without it.
+    //- CALCULATION: accumulate the Welford M2 and write _PAVariance
     bool crossCycleVariance;
 
-    //- Keep + write the per-cycle bin value (_Bin; "bin" mode's capture)
+    //- OUTPUT: keep + write the completed cycle's own bin value (_Bin)
     bool writePerCycle;
 
     binProducts()
     :
-        mean(true),
+        writeMean(true),
         secondMoment(true),
         crossCycleVariance(true),
         writePerCycle(false)

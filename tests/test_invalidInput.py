@@ -120,12 +120,12 @@ ROWS = [
      BASE + "        binAlignment middle;\n",
      "unknown binAlignment", 1.0),
     # --- step-7 per-field product rows ---
-    ("variance_without_mean",
-     "        fields ( U { phaseMean off; crossCycleVariance on; } );\n"
-     "        period 1.0;\n        nBins 8;\n",
-     "crossCycleVariance requires", 1.0),
     ("unknown_field_option",
      "        fields ( U { secondMomnet off; } );\n"
+     "        period 1.0;\n        nBins 8;\n",
+     "unknown per-field option", 1.0),
+    ("old_phaseMean_option",
+     "        fields ( U { phaseMean off; } );\n"
      "        period 1.0;\n        nBins 8;\n",
      "unknown per-field option", 1.0),
 ]

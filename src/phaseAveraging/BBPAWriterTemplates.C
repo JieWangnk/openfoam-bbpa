@@ -241,15 +241,21 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
 
             // Build the PA field values without triggering tmp<> expressions
             // on registered fields. We compute in a copy.
-            // phaseMean off suppresses only this FILE; the mean chain is
-            // still accumulated (the Welford variance needs it).
-            if (bi.products_.mean)
+            // writePhaseMean off suppresses only the _PA FILE; the mean
+            // chain always accumulates. When the variance is on, the mean
+            // must still be PERSISTED (the restart folds Welford deltas
+            // against it), so it goes to the checkpoint-only
+            // <field><suffix>meanState file instead of _PA.
+            const bool writeMeanState =
+                !bi.products_.writeMean && bi.stats_.M2_.set(binI);
+            if (bi.products_.writeMean || writeMeanState)
             {
             FieldType paField
             (
                 IOobject
                 (
-                    bi.fieldName_ + paSuffix,
+                    bi.fieldName_ + paSuffix
+                  + (writeMeanState ? word("meanState") : word::null),
                     binTimeName,
                     mesh,
                     IOobject::NO_READ,
@@ -416,7 +422,7 @@ void Foam::functionObjects::BBPA::writer::companion
     if (!bi.stats_.mean_.set(binI)) return;
 
     // The companion file IS the phase-mean product.
-    if (!bi.products_.mean) return;
+    if (!bi.products_.writeMean) return;
 
     const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
     const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;

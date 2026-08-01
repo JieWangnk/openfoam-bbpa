@@ -93,7 +93,8 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
         binProducts prods;
         {
             const dictionary& fd = fieldOptions_[fieldName];
-            prods.mean = fd.lookupOrDefault<Switch>("phaseMean", true);
+            prods.writeMean =
+                fd.lookupOrDefault<Switch>("writePhaseMean", true);
             prods.secondMoment =
                 fd.lookupOrDefault<Switch>("secondMoment", true);
             prods.crossCycleVariance =
@@ -469,9 +470,12 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     // fields: a plain list -- fields (U p) -- or the v2 annotated form with
     // per-field product options after any entry:
     //     fields ( U  p { secondMoment off; crossCycleVariance off; } );
-    // Options: phaseMean, secondMoment, crossCycleVariance, writePerCycle
-    // (each a Switch; defaults in initializeBinItems()). An unknown option
-    // word aborts -- a typo must not silently keep the default.
+    // Options: writePhaseMean, secondMoment, crossCycleVariance,
+    // writePerCycle (each a Switch; defaults in initializeBinItems()). An
+    // unknown option word aborts -- a typo must not silently keep the
+    // default. writePhaseMean gates only the _PA FILE: the mean always
+    // accumulates, so crossCycleVariance works with it off (the mean chain
+    // is then persisted as the checkpoint-only meanState file).
     fieldNames_.clear();
     fieldOptions_.clear();
     {
@@ -486,7 +490,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 const word& k = iter().keyword();
                 if
                 (
-                    k != "phaseMean"
+                    k != "writePhaseMean"
                  && k != "secondMoment"
                  && k != "crossCycleVariance"
                  && k != "writePerCycle"
@@ -494,24 +498,10 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 {
                     FatalErrorInFunction
                         << "unknown per-field option '" << k << "' for field "
-                        << fname << "; valid options: phaseMean, "
+                        << fname << "; valid options: writePhaseMean, "
                         << "secondMoment, crossCycleVariance, writePerCycle."
                         << exit(FatalError);
                 }
-            }
-
-            if
-            (
-                fd.lookupOrDefault<Switch>("crossCycleVariance", true)
-             && !fd.lookupOrDefault<Switch>("phaseMean", true)
-            )
-            {
-                FatalErrorInFunction
-                    << "field " << fname << ": crossCycleVariance requires "
-                    << "phaseMean -- the restart restores the mean chain "
-                    << "from the _PA file, and every post-restart Welford "
-                    << "fold would otherwise run against a zero mean."
-                    << exit(FatalError);
             }
 
             fieldNames_.append(fname);

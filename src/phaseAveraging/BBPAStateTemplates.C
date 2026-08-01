@@ -191,15 +191,20 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
         const scalar binTime = cycleStartTime + binI * binDeltaT;
         const word binTimeName = Time::timeName(binTime);
 
-        // 1. mean: read fieldName_PA into stats_.mean_[binI].
-        //    Only when the mean product is on: with phaseMean off no _PA
-        //    was ever written, and treating that as "checkpoint lost"
-        //    would wrongly reset the counts the OTHER products rely on.
-        if (bi.products_.mean)
+        // 1. mean: restore stats_.mean_[binI] from the file the writer
+        //    actually emitted -- _PA when writePhaseMean is on, the
+        //    checkpoint-only meanState file when it is off but the variance
+        //    still needs the mean chain. With neither, skip: no file was
+        //    ever written, and treating that as "checkpoint lost" would
+        //    wrongly reset the counts the OTHER products rely on.
+        const bool meanFromState =
+            !bi.products_.writeMean && bi.stats_.M2_.set(binI);
+        if (bi.products_.writeMean || meanFromState)
         {
             IOobject paIO
             (
-                fieldName + paSuffix,
+                fieldName + paSuffix
+              + (meanFromState ? word("meanState") : word::null),
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,

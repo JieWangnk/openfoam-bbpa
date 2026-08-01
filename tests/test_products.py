@@ -11,15 +11,23 @@ the ones that remain.
   plain      fields (U);                                back-compat: all on
   meanOnly   U { secondMoment off; crossCycleVariance off; }
                 -> U_PA only; no U_PA_UU, no U_PAVariance anywhere
-  sqrOnly    U { phaseMean off; crossCycleVariance off; }
-                -> U_PA_UU only; no U_PA anywhere (the mean chain still
-                   accumulates internally; only its FILE is off)
+  sqrOnly    U { writePhaseMean off; crossCycleVariance off; }
+                -> U_PA_UU only; no U_PA and no U_PAmeanState anywhere
+                   (variance off too, so the mean chain need not persist)
+  varOnly    U { writePhaseMean off; secondMoment off; }
+                -> U_PAVariance == closed form with NO U_PA file; the mean
+                   chain persists as the checkpoint-only U_PAmeanState
+                   (Choice A: calculation dependency and file output are
+                   separate concerns)
+  mixed      fields ( U  p { secondMoment off; crossCycleVariance off; } )
+                -> per-field allocation independent: U carries all three
+                   products, p only p_PA (p is not prescribed, so only its
+                   manifest is asserted)
+  perCycOff  writeMode bin with U { writePerCycle off; }
+                -> no U_Bin anywhere; the cross-cycle _BinPA* unaffected
   restart    meanOnly, checkpointed at t=3 and restarted to t=6:
-                continuous == restarted exactly (reduced products must not
-                break the checkpoint round-trip)
-
-The invalid combination (crossCycleVariance without phaseMean) aborts --
-asserted in test_invalidInput.
+                continuous == restarted exactly; ALSO varOnly restarted ->
+                variance survives via the meanState checkpoint
 
 Runnable standalone (exit 1 on failure, for Alltest) and via pytest.
 """
@@ -40,8 +48,12 @@ FINAL_CS = 5.0
 
 MEAN_ONLY = ("fields          ( U { secondMoment off; "
              "crossCycleVariance off; } );")
-SQR_ONLY = ("fields          ( U { phaseMean off; "
+SQR_ONLY = ("fields          ( U { writePhaseMean off; "
             "crossCycleVariance off; } );")
+VAR_ONLY = ("fields          ( U { writePhaseMean off; "
+            "secondMoment off; } );")
+MIXED = ("fields          ( U  p { secondMoment off; "
+         "crossCycleVariance off; } );")
 
 
 def _err(a, b):
@@ -69,9 +81,10 @@ def _run(name, fields_line, end_time=END_TIME):
     return rundir
 
 
-def _manifest(rundir):
-    """Which product files exist anywhere in the run's time dirs."""
-    found = {"U_PA": 0, "U_PA_UU": 0, "U_PAVariance": 0}
+def _manifest(rundir, names=("U_PA", "U_PA_UU", "U_PAVariance",
+                             "U_PAmeanState", "U_Bin", "p_PA", "p_PA_UU")):
+    """How often each product file appears across the run's time dirs."""
+    found = {f: 0 for f in names}
     for tv, full in rv._time_dirs(rundir).items():
         for f in found:
             if os.path.isfile(os.path.join(full, f)):
@@ -120,10 +133,43 @@ def run_rows():
     m = _manifest(rd)
     if not m["U_PA_UU"]:
         errors.append("sqrOnly: U_PA_UU missing")
-    if m["U_PA"] or m["U_PAVariance"]:
+    if m["U_PA"] or m["U_PAVariance"] or m["U_PAmeanState"]:
         errors.append(f"sqrOnly: off products written, manifest {m}")
     _check_closed("sqrOnly", rv.read_bbpa_output(rd, FINAL_CS), closed,
                   ("PA_UU",), errors)
+
+    # -- variance only (Choice A): no _PA file, meanState checkpoint ---------
+    rd = _run("prod_varOnly", VAR_ONLY)
+    m = _manifest(rd)
+    if not m["U_PAVariance"]:
+        errors.append("varOnly: U_PAVariance missing")
+    if not m["U_PAmeanState"]:
+        errors.append("varOnly: U_PAmeanState checkpoint missing")
+    if m["U_PA"] or m["U_PA_UU"]:
+        errors.append(f"varOnly: off products written, manifest {m}")
+    _check_closed("varOnly", rv.read_bbpa_output(rd, FINAL_CS), closed,
+                  ("PAVariance",), errors)
+
+    # -- mixed fields: per-field allocation independent ----------------------
+    rd = _run("prod_mixed", MIXED)
+    m = _manifest(rd)
+    if not (m["U_PA"] and m["U_PA_UU"] and m["U_PAVariance"] and m["p_PA"]):
+        errors.append(f"mixed: expected U all + p_PA, manifest {m}")
+    if m["p_PA_UU"]:
+        errors.append(f"mixed: p_PA_UU written though off, manifest {m}")
+    _check_closed("mixed-U", rv.read_bbpa_output(rd, FINAL_CS), closed,
+                  ("PA", "PA_UU", "PAVariance"), errors)
+
+    # -- writePerCycle off in bin mode: no U_Bin, _BinPA unaffected ----------
+    rd = _run("prod_perCycOff",
+              "fields          ( U { writePerCycle off; } );\n"
+              "        writeMode       bin;")
+    m = _manifest(rd)
+    if m["U_Bin"]:
+        errors.append(f"perCycOff: U_Bin written though off ({m['U_Bin']}x)")
+    got = rv.read_bbpa_output(rd, FINAL_CS, suffix="_BinPA")
+    _check_closed("perCycOff", got, closed, ("PA", "PA_UU", "PAVariance"),
+                  errors)
 
     # -- restart with reduced products ---------------------------------------
     c2, l2 = rv.make_case("prod_restart", "bin_constant", DT, 3.0, 3.0,
@@ -145,6 +191,25 @@ def run_rows():
         if e != 0.0:
             errors.append(f"restart: bin {j} PA continuous vs restarted "
                           f"differ by {e:.3e}")
+
+    # -- varOnly restart: the variance survives via the meanState checkpoint
+    c3, l3 = rv.make_case("prod_restart_var", "bin_constant", DT, 3.0, 3.0,
+                          bbpa_body=_body(VAR_ONLY))
+    assert rv.block_mesh(c3).returncode == 0
+    assert rv.run_serial(c3).returncode == 0
+    with open(os.path.join(c3, "system", "controlDict"), "w") as f:
+        f.write(rv.control_dict("bin_constant", DT, END_TIME, 3.0,
+                                "startTime", l3, start_time=3.0,
+                                bbpa_body=_body(VAR_ONLY)))
+    assert rv.sh("foamRun > log.foamRun2 2>&1", c3).returncode == 0
+    rest_v = rv.read_bbpa_output(c3, FINAL_CS)
+    for j in range(rv.I):
+        if j not in rest_v:
+            errors.append(f"varOnly restart: bin {j} missing")
+            continue
+        e = _err(rest_v[j]["PAVariance"], closed[j]["PAVariance"])
+        if e >= TOL:
+            errors.append(f"varOnly restart: bin {j} PAVariance err {e:.3e}")
     return errors
 
 
@@ -160,7 +225,8 @@ if __name__ == "__main__":
         for e in errors:
             print("  ", e)
         sys.exit(1)
-    print("products rows: PASS -- plain/meanOnly/sqrOnly manifests exact,")
-    print(f"  surviving products == closed form to {TOL:.0e}, and a meanOnly")
-    print("  restart reproduces the continuous run exactly")
+    print("products rows: PASS -- plain/meanOnly/sqrOnly/varOnly/mixed/")
+    print(f"  perCycOff manifests exact, surviving products == closed form to")
+    print(f"  {TOL:.0e}; meanOnly restart == continuous exactly; varOnly")
+    print("  variance survives restart via the meanState checkpoint")
     sys.exit(0)
