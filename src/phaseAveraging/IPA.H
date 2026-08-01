@@ -43,6 +43,7 @@ Description
 #define IPA_H
 
 #include "fvMeshFunctionObject.H"
+#include "phaseClock.H"
 #include "volFieldsFwd.H"
 #include "HashPtrTable.H"
 #include "scalarField.H"
@@ -82,6 +83,11 @@ class IPA
 
         //- Phase interval (period / nPhases)
         scalar phaseInterval_;
+
+        //- The phase/cycle boundary arithmetic (shared with BBPA); IPA's
+        //  own copy of this logic once lacked BBPA's clock-drift snap fix
+        //  -- exactly the drift phaseClock.H exists to end.
+        phaseClock clock_;
 
         //- Current cycle number
         label currentCycle_;

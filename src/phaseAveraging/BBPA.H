@@ -42,6 +42,7 @@ Description
 #define BBPA_H
 
 #include "fvMeshFunctionObject.H"
+#include "phaseClock.H"
 #include "volFieldsFwd.H"
 #include "HashPtrTable.H"
 #include "HashSet.H"
@@ -193,6 +194,13 @@ class BBPA
         //  startTime_. Kept separate so bin LABELS (which use startTime_)
         //  remain on the write times.
         scalar phaseOrigin_;
+
+        //- The phase/cycle/bin boundary arithmetic, configured from the
+        //  members above wherever phaseOrigin_ is (re)computed. Every
+        //  WHICH-bin/WHICH-cycle decision goes through this one object --
+        //  see phaseClock.H for why (four copies of this logic once drifted
+        //  apart).
+        phaseClock clock_;
 
         //- "bin" mode: write the cross-cycle _BinPA* files only every Nth
         //  completed cycle. The per-cycle _Bin file is always written (it is

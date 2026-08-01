@@ -46,56 +46,20 @@ namespace functionObjects
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
-// Snap a value that is within a whisker of a whole number onto it, then
-// truncate. Needed because the natural expression label(x) is exact only when
-// x is not sitting on an integer boundary -- and in production it almost always
-// IS: a case with period 0.5 and I=50 has a bin width of 0.01, equal to its
-// writeInterval, so EVERY bin edge lands on a solver time.
-//
-// The failure is not hypothetical. fmod(2.9, 1.0) returns 0.8999999999999999,
-// not 0.9, so 0.8999999999999999/0.05 = 17.999999999999996 truncates to bin 17
-// when the step belongs in bin 18. The error grows with t (the mantissa has
-// fewer bits left for the fraction), which is why a run drifts from 51 steps
-// per bin in the first cycle to 49 by the third instead of a constant 50.
-//
-// Whether a given step lands right therefore depended on the last bit of
-// OpenFOAM's accumulated clock. At I=200 a bin can be only ~25 timesteps wide,
-// so one misplaced step is ~4% of the bin.
-//
-// The tolerance is in BIN UNITS and is ~7 orders of magnitude smaller than the
-// timestep-to-bin ratio of any sane configuration, so it can only ever absorb
-// floating-point noise, never a step that genuinely belongs to the lower bin.
-static inline Foam::label bbpaSnapFloor(const Foam::scalar x)
-{
-    const Foam::scalar r = std::floor(x);
-    return Foam::label((x - r) > (1.0 - 1e-9) ? r + 1.0 : r);
-}
-
+// All phase/cycle/bin boundary arithmetic -- the snapped floor, the fmod
+// wrap-around guard, the label/phase origins -- lives in phaseClock (see
+// phaseClock.H for the full rationale). These wrappers exist so every caller
+// classifies the CURRENT solver instant the same way.
 
 Foam::label Foam::functionObjects::BBPA::phaseBin() const
 {
-    // phaseOrigin_ == startTime_ normally; startTime_ - dT/2 when binCentred_,
-    // which makes bin j cover [j*dT - dT/2, j*dT + dT/2) in the user's phase,
-    // i.e. CENTRED on its label time j*dT rather than starting there.
-    const scalar t = time_.value() - phaseOrigin_;
-    scalar phase = std::fmod(t, period_);
-
-    // fmod can return period-1ulp instead of 0 for an on-grid time, which
-    // would put the first step of a cycle in the LAST bin of that cycle.
-    if (phase > period_*(1.0 - 1e-12)) phase = 0;
-
-    return min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+    return clock_.phaseBin(time_.value());
 }
 
 
 Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 {
-    // Must use the SAME origin as phaseBin(): with binCentred_ the cycle runs
-    // [n*T - dT/2, (n+1)*T - dT/2) so that bin 0, centred on phase 0, lies
-    // wholly inside one cycle instead of straddling the boundary and losing
-    // its first half to the cycle reset.
-    const scalar t = time_.value() - phaseOrigin_;
-    return bbpaSnapFloor(t/period_);
+    return clock_.cycleNumber(time_.value());
 }
 
 
@@ -219,9 +183,9 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
     // already passed are written, so every directory touched is at or behind
     // the solver clock -- never ahead of it, which is what made restart cleanup
     // delete live bin data in an earlier version.
-    const scalar cycleStart = startTime_ + cycle*period_;
+    const scalar cycleStart = clock_.cycleStart(cycle);
     const scalar now = time_.value();
-    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+    const scalar centreOffset = clock_.centreOffset();
 
     // Never persist the bin a restart landed inside: it covers only part of its
     // window this cycle, and a file written from it would be recovered later as
@@ -247,9 +211,9 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
 
 Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
 {
-    const scalar cycleStart = startTime_ + currentCycle_*period_;
+    const scalar cycleStart = clock_.cycleStart(currentCycle_);
     const scalar now = time_.value();
-    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+    const scalar centreOffset = clock_.centreOffset();
     label n = 0;
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
@@ -288,13 +252,10 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
     // the start phase lies STRICTLY INSIDE it. Beginning exactly on a bin edge
     // (the ordinary uncentred cold start) covers the bin fully and must not be
     // dropped.
-    const scalar tRes = runStartTime_ - phaseOrigin_;
-    scalar phase = std::fmod(tRes, period_);
-    if (phase > period_*(1.0 - 1e-12)) phase = 0;
-
-    const label binI = min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+    const scalar phase = clock_.wrapPhase(runStartTime_);
+    const label binI = clock_.phaseBin(runStartTime_);
     const scalar binStart = binI*binDeltaT_;
-    const label cyc = bbpaSnapFloor(tRes/period_);
+    const label cyc = clock_.cycleNumber(runStartTime_);
 
     if (phase - binStart > 1e-9*binDeltaT_)
     {
@@ -307,8 +268,7 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
         bool recoverable = false;
         if (binNaming_ && !fieldNames_.empty())
         {
-            const scalar labelTime =
-                startTime_ + cyc*period_ + binI*binDeltaT_;
+            const scalar labelTime = clock_.binLabelTime(cyc, binI);
             const fileName binFile =
                 mesh_.time().path()/Time::timeName(labelTime)
                /(fieldNames_[0] + "_Bin");
@@ -365,8 +325,7 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
     // silently averaging real cycles against a phantom zero.  Stamping the
     // window the data belongs to keeps every bin dir at or behind the solver
     // clock, so the cleanup never touches it and no cleanup change is needed.
-    const scalar cycleStart =
-        startTime_ + max(currentCycle_ - 1, 0) * period_;
+    const scalar cycleStart = clock_.cycleStart(max(currentCycle_ - 1, 0));
 
     forAllConstIter
     (
@@ -749,6 +708,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     }
 
     phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
+    clock_.reset(period_, nBins_, startTime_, binCentred_);
 
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
@@ -1116,6 +1076,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // from the RESTART time, silently un-centring every bin after a restart
         // while the labels stayed put.
         phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
+        clock_.reset(period_, nBins_, startTime_, binCentred_);
 
         // Straddled-bin guard. The run resumes at the last WRITTEN time, which
         // need not be a bin boundary. The bin containing that instant will now
@@ -1136,7 +1097,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // wrote, not from an already-advanced cycle.  Must mirror
         // writeAllAveragedFields(): the bins live in the window of the cycle
         // they describe (currentCycle_-1), which is at/behind the solver clock.
-        checkpointCycleStart_ = startTime_ + max(currentCycle_ - 1, 0) * period_;
+        checkpointCycleStart_ = clock_.cycleStart(max(currentCycle_ - 1, 0));
 
         // Backward compatibility: checkpoints written before this fix stamped
         // the bins one cycle LATER (currentCycle_*period_). If the current
@@ -1144,7 +1105,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // back to it so an in-flight run restarts against its own history
         // instead of silently cold-starting.
         {
-            const scalar legacyStart = startTime_ + currentCycle_ * period_;
+            const scalar legacyStart = clock_.cycleStart(currentCycle_);
             const word probe = fieldNames_.size() ? fieldNames_[0] : word::null;
             if (probe != word::null && !legacyStart_probed_)
             {
@@ -1176,7 +1137,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // it happens to register, and not skipped entirely (the bug: the
         // recovery used to run once here, for U only, so WSS lost a whole cycle
         // on every bin whose window had closed before the restart).
-        inProgressCycleStart_ = startTime_ + currentCycle_*period_;
+        inProgressCycleStart_ = clock_.cycleStart(currentCycle_);
         inProgressNow_ = time_.value();
         inProgressCaptured_ = true;
     }

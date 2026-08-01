@@ -42,26 +42,28 @@ namespace functionObjects
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
+// Phase/cycle classification goes through the shared phaseClock (see
+// phaseClock.H): IPA's former private copies of this arithmetic used plain
+// truncation and so lacked the clock-drift snap fix BBPA received -- the
+// bin/cycle assignment could differ between the two objects on the very same
+// solver step.
+
 Foam::label Foam::functionObjects::IPA::currentCycleNumber() const
 {
-    const scalar t = time_.value() - startTime_;
-    return label(t / period_);
+    return clock_.cycleNumber(time_.value());
 }
 
 
 Foam::label Foam::functionObjects::IPA::currentPhaseIndex() const
 {
-    const scalar t = time_.value() - startTime_;
-    const scalar phase = std::fmod(t, period_);
-    return label(phase / phaseInterval_);
+    return clock_.phaseBin(time_.value());
 }
 
 
 bool Foam::functionObjects::IPA::isAtPhasePoint(label& phaseIndex) const
 {
-    const scalar t = time_.value() - startTime_;
-    const scalar phase = std::fmod(t, period_);
-    
+    const scalar phase = clock_.wrapPhase(time_.value());
+
     // Check each phase point to see if we're within tolerance
     for (label i = 0; i < nPhases_; i++)
     {
@@ -294,6 +296,7 @@ bool Foam::functionObjects::IPA::read(const dictionary& dict)
     }
 
     phaseInterval_ = period_ / scalar(nPhases_);
+    clock_.reset(period_, nPhases_, startTime_, false);
 
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
