@@ -38,14 +38,24 @@ q_BinPA[j,N] = (1/N) · Σ_{c=1..N} q_Bin[c,j]
 | cross-cycle second moment | `<q>_PA_UU` | equal-weight mean of the per-cycle second moments; Reynolds stress `R = ⟨q⊗q⟩ − ⟨q⟩⊗⟨q⟩` and TKE `½·tr(R)` follow offline |
 | cross-cycle variance | `<q>_PAVariance` | Welford `M₂/(N−1)` of the per-cycle bin means (true inner-product recurrence `M₂ += δ·δ′`; defined for N ≥ 2) |
 
-Time integration assigns each solver step to the bin containing its **end**
-time, with a boundary snap (1e-9 in bin units) that makes the assignment
-immune to accumulated floating-point clock drift. A step that straddles a
-bin edge is therefore credited whole to its end bin: bin *weights* deviate
-by at most one step per cycle (measured and bounded in
-`tests/test_variableDt.py`), while bin *means* remain exact for
-bin-resolved signals. The in-progress cycle is **never** blended into any
-cross-cycle product, in any output layout.
+Each solver interval [t<sub>n</sub>, t<sub>n+1</sub>] is **split at every
+phase-bin or cycle boundary it crosses**; its contribution to bin
+*I<sub>c,j</sub>* is the exact overlap
+
+```
+Δt[n,c,j] = max( 0, min(t_{n+1}, b_{c,j+1}) − max(t_n, b_{c,j}) )
+```
+
+so that `Σ_{c,j} Δt[n,c,j] = t_{n+1} − t_n` for every solver step and
+`Σ_j W[c,j] = T` for every completed cycle (both asserted at machine level
+in `tests/test_variableDt.py`). The step's single field sample is treated
+as constant over the whole interval — a first-order-in-time quadrature; a
+step that straddles a boundary therefore carries its one sample into both
+bins, and the resulting bin-mean quadrature error is O(Δt) (measured and
+reported in the same test). A floating-point snap (1e-9 in bin units) is
+used **only to classify** times lying numerically on a boundary; it never
+assigns a straddling step whole to one bin. The in-progress cycle is
+**never** blended into any cross-cycle product, in any output layout.
 
 ## Features
 

@@ -47,6 +47,7 @@ Description
 
 #include "scalar.H"
 #include "label.H"
+#include "DynamicList.H"
 
 #include <cmath>
 
@@ -180,6 +181,55 @@ public:
         }
 
 
+        // Overlap integration (the v2 numerical contract)
+
+        //- One integration segment of a solver step: the part of the
+        //  interval lying inside a single bin of a single cycle
+        struct segment
+        {
+            label cycle;
+            label bin;
+            scalar dt;
+        };
+
+        //- Split the solver interval (t0, t1] at every bin boundary it
+        //  crosses, so each returned segment is the exact overlap
+        //  dt(n,c,j) = max(0, min(t1,b(j+1)) - max(t0,b(j))) with one
+        //  (cycle, bin). Consequently sum(segments.dt) == t1 - t0 for
+        //  every step and sum_j W(c,j) == period for every completed
+        //  cycle. The snap classifies an ENDPOINT lying numerically on a
+        //  boundary (a segment ending on a boundary belongs to the bin
+        //  BELOW it; one starting there to the bin above) -- it never
+        //  assigns a genuinely straddling interval whole to one bin.
+        void split
+        (
+            const scalar t0,
+            const scalar t1,
+            DynamicList<segment>& segs
+        ) const
+        {
+            segs.clear();
+
+            const scalar tol = 1e-9*binDeltaT_;
+
+            // global bin index just above t0 (snap: t0 on a boundary
+            // starts the interval in the bin ABOVE it, consistent with
+            // phaseBin of points immediately after t0)
+            label m = snapFloor((t0 - phaseOrigin_)/binDeltaT_);
+            scalar cur = t0;
+            scalar b = phaseOrigin_ + (m + 1)*binDeltaT_;
+
+            while (b < t1 - tol)
+            {
+                segs.append(globalSegment(m, b - cur));
+                cur = b;
+                ++m;
+                b = phaseOrigin_ + (m + 1)*binDeltaT_;
+            }
+            segs.append(globalSegment(m, t1 - cur));
+        }
+
+
         // Access
 
         scalar period() const { return period_; }
@@ -188,6 +238,24 @@ public:
         scalar labelOrigin() const { return labelOrigin_; }
         scalar phaseOrigin() const { return phaseOrigin_; }
         bool centred() const { return centred_; }
+
+
+private:
+
+        //- Map a global bin index (bins counted from the phase origin
+        //  across all cycles) to a (cycle, bin, dt) segment
+        segment globalSegment(const label g, const scalar dt) const
+        {
+            // floor division, correct for negative g
+            label cyc = g/nBins_;
+            label bin = g - cyc*nBins_;
+            if (bin < 0)
+            {
+                bin += nBins_;
+                cyc -= 1;
+            }
+            return segment{cyc, bin, dt};
+        }
 };
 
 } // End namespace Foam

@@ -233,6 +233,10 @@ class BBPA
         //  apart).
         phaseClock clock_;
 
+        //- Scratch list for the overlap segments of the current solver
+        //  step (reused every execute() to avoid per-step allocation)
+        DynamicList<phaseClock::segment> segs_;
+
         //- "bin" mode: write the cross-cycle _BinPA* files only every Nth
         //  completed cycle. The per-cycle _Bin file is always written (it is
         //  what makes the output restart-safe at write granularity).
@@ -617,6 +621,15 @@ class BBPA
         //  internal stats_.mean_, stats_.M2_ and stats_.meanSqr_ arrays.
         //  No-op when no Properties file is found (= cold start).
         void readCheckpoint();
+
+        //- Advance the cycle bookkeeping to cycle c: flush and finalise
+        //  the previous cycle (with the restart-straddle skip), reset the
+        //  integrators, honour discardCycles/maxCycles, and move
+        //  previousCycle_ forward. Called between overlap segments as a
+        //  step crosses a cycle boundary, and after the segment loop when
+        //  a step ENDS exactly on one (so a write at that instant sees
+        //  the completed ensemble). Never retreats.
+        void advanceCycleTo(const label c);
 
         //- Resolve a field's per-field product options to a binProducts
         //  (defaults: everything on; writePerCycle defaults to the "bin"

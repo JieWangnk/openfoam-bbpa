@@ -40,8 +40,12 @@ write() per bin (what lands on disk) -- see BBPATemplates.C write():
                      no complete cycle exists yet -- never blended)
    phi_PAVariance  = M2/(binCounts-1)            (PURE finalised; never blended)
    phi_PA_UU       = meanSqr    (same rule as phi_PA)
-Execute() cycle logic (BBPA.C execute()): finalise the PREVIOUS cycle on the
-first step of a new cycle (only if previousCycle >= startCycle), then reset.
+Execute() (BBPA.C, v2 overlap contract): each solver step (t-dt, t] is
+split at every bin boundary it crosses; each bin is credited its exact
+overlap, with the step's single sample treated as constant over the whole
+interval. The previous cycle is finalised as its last segment closes
+(including a step ENDING exactly on the boundary); pre-checkpoint segments
+of a restart's replayed step are skipped.
 
 Vectors are length-3 numpy arrays; the symmetric second moment U_i U_j is a
 full 3x3 symmetric matrix.  magSqr(vector) = sum of squares (a scalar), exactly
@@ -166,24 +170,54 @@ class BBPAReplica:
                     self.M2[j] += float(np.dot(delta, delta2))
                     self.meanSqr[j] = (self.meanSqr[j] * (count - 1.0) + cycleMeanSqr) / count
 
-    # -- one solver-step execute() (BBPA::execute) ------------------------- #
+    # -- overlap splitting (phaseClock::split) ----------------------------- #
+    def _split(self, t0, t1):
+        """Split (t0, t1] at every bin boundary it crosses; yields
+        (global_bin_index, dt) with exact overlap weights. Mirrors
+        phaseClock::split including the endpoint snap semantics (a segment
+        ending ON a boundary belongs to the bin BELOW it)."""
+        tol = 1e-9 * self.bin_dt
+        m = snap_floor((t0 - self.start_time) / self.bin_dt)
+        cur = t0
+        b = self.start_time + (m + 1) * self.bin_dt
+        segs = []
+        while b < t1 - tol:
+            segs.append((m, b - cur))
+            cur = b
+            m += 1
+            b = self.start_time + (m + 1) * self.bin_dt
+        segs.append((m, t1 - cur))
+        return segs
+
+    def _advance_to(self, cyc):
+        if cyc <= self.previousCycle:
+            return
+        if self.previousCycle >= self.start_cycle:
+            self._finalize_cycle()
+        self._reset_cycle()
+        self.previousCycle = cyc
+
+    # -- one solver-step execute() (BBPA::execute, v2 overlap contract) ---- #
     def execute(self, t, dt, U):
         U = np.asarray(U, dtype=float)
-        binI = phase_bin(t, self.start_time, self.period, self.n_bins)
-        self.currentCycle = cycle_number(t, self.start_time, self.period)
 
-        if self.currentCycle < self.start_cycle:
-            return
-        # (cycles_ limit not used here; start_cycle only)
+        for g, dts in self._split(t - dt, t):
+            cyc = g // self.n_bins           # floor division (negatives ok)
+            binI = g - cyc * self.n_bins
+            # pre-checkpoint segments are already folded into the ensemble
+            if cyc < self.previousCycle:
+                continue
+            self._advance_to(cyc)
+            if cyc < self.start_cycle:
+                continue
+            self.currentBin = binI
+            self._accumulate(binI, U, dts)
 
-        if self.currentCycle != self.previousCycle:
-            if self.previousCycle >= self.start_cycle:
-                self._finalize_cycle()
-            self._reset_cycle()
-            self.previousCycle = self.currentCycle
-
-        self.currentBin = binI
-        self._accumulate(binI, U, dt)
+        # a step ending exactly on a cycle boundary completes that cycle
+        end_cycle = cycle_number(t, self.start_time, self.period)
+        if end_cycle > self.previousCycle:
+            self._advance_to(end_cycle)
+        self.currentCycle = end_cycle
 
     # -- replay a list of (t, dt, U) samples ------------------------------- #
     def replay(self, samples):

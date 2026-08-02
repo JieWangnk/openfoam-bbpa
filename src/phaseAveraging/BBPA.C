@@ -1103,111 +1103,137 @@ bool Foam::functionObjects::BBPA::execute()
         flagStraddledBin();
     }
 
-    const label binI = phaseBin();
-    currentCycle_ = currentCycleNumber();
+    // The v2 numerical contract: split the solver step at every bin (and
+    // hence cycle) boundary it crosses, and credit each bin its exact
+    // overlap dt(n,c,j). The single field sample of the step is treated
+    // as constant over the whole interval (first-order in time), so bin
+    // WEIGHTS are exact -- sum(segments) = dt for every step and
+    // sum_j W(c,j) = period for every completed cycle -- and the bin mean
+    // is the integral of that discrete signal, not an end-time lumping.
+    const scalar tNow = time_.value();
+    const scalar dtStep = time_.deltaT().value();
 
-    // Check if we should start averaging yet
-    if (currentCycle_ < startCycle_)
+    clock_.split(tNow - dtStep, tNow, segs_);
+
+    const bool limited = (cycles_ > 0);
+    const label limit = startCycle_ + cycles_;
+
+    forAll(segs_, i)
     {
-        return true;
+        const label segCycle = segs_[i].cycle;
+
+        // A restart's startup re-execute replays the step that ended at
+        // the checkpoint instant; its pre-checkpoint segments belong to a
+        // cycle already folded into the restored ensemble. Skip them --
+        // counting them again would double-integrate that interval.
+        if (segCycle < previousCycle_) continue;
+
+        advanceCycleTo(segCycle);
+
+        if (segCycle < startCycle_) continue;
+        if (limited && segCycle >= limit) continue;
+
+        currentBin_ = segs_[i].bin;
+        accumulateAllFields(currentBin_, segs_[i].dt);
+        previousBin_ = currentBin_;
     }
 
-    // Check if within averaging cycle limit
-    if (cycles_ > 0 && currentCycle_ >= (startCycle_ + cycles_))
+    // A step ENDING exactly on a cycle boundary completes that cycle: the
+    // boundary instant itself classifies (snap) into the NEXT cycle, so
+    // finalise now rather than on the next step -- a write() fired at
+    // this very instant must see the completed ensemble.
+    currentCycle_ = currentCycleNumber();
+    if (currentCycle_ > previousCycle_)
     {
-        // The final averaged cycle completes exactly at this boundary, and
-        // the transition block below (which normally finalises the previous
-        // cycle on the first step of the next one) is no longer reached.
-        // Finalise it once here, or it stays stranded in the current-cycle
-        // accumulators and "cycles N" silently delivers an (N-1)-cycle
-        // ensemble. One-shot: previousCycle_ is moved past the limit after.
-        if
-        (
-            previousCycle_ >= startCycle_
-         && previousCycle_ < (startCycle_ + cycles_)
-        )
+        advanceCycleTo(currentCycle_);
+    }
+
+    // The bin containing the CURRENT instant (companion writes use this)
+    currentBin_ = phaseBin();
+
+    return true;
+}
+
+
+void Foam::functionObjects::BBPA::advanceCycleTo(const label c)
+{
+    if (c <= previousCycle_)
+    {
+        return;
+    }
+
+    const bool limited = (cycles_ > 0);
+    const label limit = startCycle_ + cycles_;
+
+    if
+    (
+        previousCycle_ >= startCycle_
+     && (!limited || previousCycle_ < limit)
+    )
+    {
+        // The completing cycle's LAST bin closes exactly at this boundary,
+        // so it has never been flushed by a write() call inside the cycle.
+        // Persist it before resetAllBinsForNewCycle() wipes the
+        // accumulator, or its _Bin_UU would never be written at all.
+        flushCurrentCycleBins(previousCycle_);
+
+        // Finalize the previous cycle (only if it was being averaged).
+        // If a restart landed mid-bin during THIS cycle, that one bin saw
+        // only part of its phase window and must not be folded in as a
+        // whole cycle -- drop it, exactly as a bin with no data is dropped.
+        const label skip =
+            (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
+
+        if (skip >= 0)
         {
-            flushCurrentCycleBins(previousCycle_);
+            Info<< "    dropping restart-straddled bin " << skip
+                << " from cycle " << previousCycle_
+                << " (partial window)" << endl;
+        }
 
-            const label skip =
-                (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
+        finalizeAllForCycle(skip);
 
-            finalizeAllForCycle(skip);
+        // consumed: later cycles cover this bin fully again
+        if (skip >= 0)
+        {
+            straddledBin_ = -1;
+            straddledCycle_ = -1;
+        }
 
-            if (skip >= 0)
-            {
-                straddledBin_ = -1;
-                straddledCycle_ = -1;
-            }
+        resetAllBinsForNewCycle();
 
-            resetAllBinsForNewCycle();
-            previousCycle_ = currentCycle_;
-
+        if (limited && c >= limit)
+        {
+            // The final averaged cycle has just been folded in; nothing
+            // accumulates beyond this point.
             Info<< "Cycle limit reached: " << cycles_
                 << " cycles averaged; accumulation stopped" << endl;
         }
-
-        return true;
-    }
-
-    // Detect cycle transition
-    if (currentCycle_ != previousCycle_)
-    {
-        if (previousCycle_ >= startCycle_)
+        else
         {
-            // The completing cycle's LAST bin closes exactly at this boundary,
-            // so it has never been flushed by a write() call inside the cycle.
-            // Persist it before resetAllBinsForNewCycle() wipes the
-            // accumulator, or its _Bin_UU would never be written at all.
-            flushCurrentCycleBins(previousCycle_);
-
-            // Finalize the previous cycle (only if it was being averaged).
-            // If a restart landed mid-bin during THIS cycle, that one bin saw
-            // only part of its phase window and must not be folded in as a
-            // whole cycle -- drop it, exactly as a bin with no data is dropped.
-            const label skip =
-                (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
-
-            if (skip >= 0)
+            Info<< "Starting cycle " << c;
+            if (c == startCycle_)
             {
-                Info<< "    dropping restart-straddled bin " << skip
-                    << " from cycle " << previousCycle_
-                    << " (partial window)" << endl;
+                Info<< " (phase averaging begins)";
             }
-
-            finalizeAllForCycle(skip);
-
-            // consumed: later cycles cover this bin fully again
-            if (skip >= 0)
-            {
-                straddledBin_ = -1;
-                straddledCycle_ = -1;
-            }
+            Info<< endl;
         }
-
-        // Reset bins for new cycle
+    }
+    else if (!(limited && previousCycle_ >= limit))
+    {
+        // Pre-averaging cycles (before discardCycles is reached): nothing
+        // to finalise, but the integrators still reset at the boundary.
         resetAllBinsForNewCycle();
 
-        Info<< "Starting cycle " << currentCycle_;
-        if (currentCycle_ == startCycle_)
+        Info<< "Starting cycle " << c;
+        if (c == startCycle_)
         {
             Info<< " (phase averaging begins)";
         }
         Info<< endl;
-
-        previousCycle_ = currentCycle_;
     }
 
-    // Update current bin tracking
-    currentBin_ = binI;
-
-    // Accumulate all fields for current time step
-    const scalar dt = time_.deltaT().value();
-    accumulateAllFields(binI, dt);
-
-    previousBin_ = currentBin_;
-
-    return true;
+    previousCycle_ = c;
 }
 
 

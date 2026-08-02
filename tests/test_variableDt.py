@@ -10,20 +10,23 @@ bin edges:
   V2: genuinely VARIABLE dt via the setTimeStep function object
       (deltaT = table of (t, dt), linearly interpolated).
 
-The bin-constant field is STRADDLE-IMMUNE by construction: a step crossing a
-bin edge carries U evaluated at its END time -- the constant of the very bin
-v1's whole-step rule assigns it to -- so bin MEANS (and hence variance) stay
-exact even though bin WEIGHTS are misassigned.  This lets both runs assert:
+Under the v2 OVERLAP contract each step is split at every bin boundary it
+crosses and each bin is credited its exact overlap; the step's single
+sample (classified by its midpoint) is treated as constant over the
+interval. Both runs assert:
 
-  1. implementation: on-disk == replica bit-faithfully (<= 1e-12), i.e. BBPA
-     behaves deterministically per its documented whole-step rule;
-  2. closed form: on-disk finalised _PA/_PA_UU/_PAVariance == the exact
-     analytic ensemble (<= 1e-12) despite straddling;
-  3. weight bookkeeping: every logged dt is assigned exactly once (total
-     conservation), and the per-cycle deviation |sum_j W_{c,j} - T| is bounded
-     by the largest step in that cycle -- the quantified v1 straddle effect
-     that the v2 split rule (Delta t_{n,j} overlap integration) will drive
-     to zero.  The deviation is reported so the v2 change is measurable.
+  1. implementation: on-disk == replica bit-faithfully (the replica
+     implements the identical splitting);
+  2. weight conservation, the v2 identities: per completed cycle
+     |sum_j W_{c,j} - T| < 1e-9 (machine-level), and the total assigned
+     mass equals the logged mass clipped at the phase origin (the FO's
+     startup execute covers the phantom interval (-dt, 0], which the
+     overlap contract correctly excludes -- the old whole-step rule
+     silently counted it);
+  3. discretisation: on-disk vs the continuous closed form now shows the
+     HONEST first-order quadrature error of one sample per step under
+     straddling (reported, sanity-bounded < 0.5) -- under the old rule the
+     bin-constant field masked it by construction.
 
 Runnable standalone (exit 1 on failure, for Alltest) and via pytest.
 """
@@ -67,11 +70,12 @@ def max_field_err(a, b, bins, fields=("PA", "PA_UU", "PAVariance")):
 
 
 def _weight_report(replica, samples):
-    """Total-assignment conservation + per-cycle straddle deviation."""
-    total_logged = sum(dt for (_, dt, _) in samples)
+    """Total-assignment conservation + per-cycle deviation (v2: ~0)."""
+    # logged mass clipped at the phase origin: the startup execute's step
+    # covers (-dt, 0], which is not integrable data
+    total_logged = sum(min(dt, max(0.0, t)) for (t, dt, _) in samples)
     total_assigned = float(sum(w.sum() for w in replica.cycleWeightHist)
                            + replica.binTime.sum())
-    # per-cycle |sum_j W_{c,j} - T|, bounded by the max step in the run
     max_dt = max(dt for (_, dt, _) in samples)
     devs = [abs(float(w.sum()) - rv.T) for w in replica.cycleWeightHist]
     return dict(total_logged=total_logged, total_assigned=total_assigned,
@@ -108,14 +112,16 @@ def _check(r, errors):
     n = r["name"]
     if max(r["impl"].values()) >= TOL:
         errors.append(f"{n}: impl {r['impl']}")
-    if max(r["disc"].values()) >= TOL:
-        errors.append(f"{n}: disc {r['disc']}")
+    # the honest first-order quadrature error: reported, sanity-bounded
+    if max(r["disc"].values()) >= 0.5:
+        errors.append(f"{n}: disc beyond first-order sanity {r['disc']}")
     w = r["weights"]
-    if w["conservation"] >= TOL * max(1.0, w["total_logged"]):
+    if w["conservation"] >= 1e-9 * max(1.0, w["total_logged"]):
         errors.append(f"{n}: total-weight conservation {w['conservation']:.3e}")
-    if w["max_cycle_dev"] > w["max_dt"] + TOL:
+    # the v2 identity: sum_j W_{c,j} == T per completed cycle
+    if w["max_cycle_dev"] >= 1e-9:
         errors.append(f"{n}: per-cycle weight deviation {w['max_cycle_dev']:.3e}"
-                      f" exceeds max step {w['max_dt']:.3e}")
+                      f" (v2 requires ~0)")
 
 
 def run_matrix():
@@ -144,8 +150,8 @@ if __name__ == "__main__":
         print(f"    disc  (on-disk vs closed form) max = "
               f"{max(r['disc'].values()):.3e}")
         print(f"    weights: total conservation = {w['conservation']:.3e}; "
-              f"per-cycle straddle deviation = {w['max_cycle_dev']:.3e} "
-              f"(v1 whole-step rule; bound = max dt {w['max_dt']:.3e})")
+              f"per-cycle |sum W - T| = {w['max_cycle_dev']:.3e} "
+              f"(v2 overlap identity)")
     if errors:
         print("FAIL:")
         for e in errors:

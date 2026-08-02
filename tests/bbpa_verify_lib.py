@@ -131,14 +131,13 @@ def coded_fo(kind, logpath, cstep=None):
             const Foam::label  I  = {I};
             const Foam::scalar t0 = 0.0;
             const Foam::scalar dtbin = T/Foam::scalar(I);
-            const Foam::scalar tt = t - t0;
+            // Classify the prescribed VALUE by the step MIDPOINT: the
+            // sample is treated as constant over the whole interval (the
+            // v2 overlap contract), and the midpoint names the bin the
+            // interval actually lies in, so a non-straddling step carries
+            // exactly its own bin's constant. Snap + wrap mirror BBPA.C.
+            const Foam::scalar tt = (t - 0.5*dt) - t0;
             Foam::scalar phase = std::fmod(tt, T);
-            // Mirror BBPA.C exactly: wrap an fmod result of period-1ulp back
-            // to phase 0, and floor with the bbpaSnapFloor snap-up (1e-9 in
-            // bin units). Plain truncation here would prescribe the LOWER
-            // bin's value near a drifted edge while the library assigns the
-            // step to the upper bin, breaking the bin-constant field's
-            // straddle immunity.
             if (phase > T*(1.0 - 1e-12)) phase = 0.0;
             const Foam::scalar bArg = phase/dtbin;
             const Foam::scalar bFlr = std::floor(bArg);
