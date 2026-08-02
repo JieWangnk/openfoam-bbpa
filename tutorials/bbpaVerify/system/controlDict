@@ -76,7 +76,7 @@ functions
         // write schedule above, so every output lands beside the solver's
         // own fields. (mode all = every bin; mode list + bins (…) = a
         // sparse subset.)
-        phaseSelection  { mode solverWriteTimes; }
+        accumulationSelection { mode solverWriteTimes; }
 
         // centred: each bin's window is centred on its label time,
         // removing the half-bin phase lag of a left-edge window.

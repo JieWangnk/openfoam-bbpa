@@ -121,7 +121,7 @@ def run_rows():
 
     # -- sparse binsOfInterest (2 5): only those bins, same numbers ----------
     rd, _ = _run("opt_sparse",
-                 "phaseSelection { mode list; bins (2 5); }")
+                 "accumulationSelection { mode list; bins (2 5); }")
     got = rv.read_bbpa_output(rd, FINAL_CS)
     _check_ensemble("sparse", got, closed, errors, bins=(2, 5))
     for j in range(rv.I):

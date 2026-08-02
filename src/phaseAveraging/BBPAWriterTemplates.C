@@ -80,6 +80,7 @@ template<class Type>
 void Foam::functionObjects::BBPA::writer::flushClosedBins
 (
     binItem<Type>& bi,
+    const boolList& writeBins,
     const Time& time,
     const scalar cycleStartTime,
     const scalar binDeltaT,
@@ -96,6 +97,7 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
     forAll(bi.integ_.binSum_, binI)
     {
         if (!bi.integ_.binSum_.set(binI)) continue;   // sparse-bin mode
+        if (!writeBins[binI]) continue;               // outputSelection
         if (binI == skipBin) continue;                  // restart-straddled
         if (bi.binFlushed_[binI]) continue;                // already on disk
         if (bi.integ_.binTime_[binI] <= 0) continue;  // no data yet
@@ -161,6 +163,7 @@ template<class Type>
 void Foam::functionObjects::BBPA::writer::phaseAligned
 (
     const binItem<Type>& bi,
+    const boolList& writeBins,
     const Time& time,
     const label nBins,
     const label currentCycle,
@@ -190,6 +193,11 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
     {
         // Skip bins not allocated in sparse-bin mode.
         if (!bi.stats_.mean_.set(binI)) continue;
+
+        // outputSelection: this bin is accumulated but not written. Its
+        // state is then also absent from the on-disk checkpoint -- such a
+        // bin cold-starts on restart (warned at read()).
+        if (!writeBins[binI]) continue;
 
         const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
         const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;
@@ -405,6 +413,7 @@ template<class Type>
 void Foam::functionObjects::BBPA::writer::companion
 (
     const binItem<Type>& bi,
+    const boolList& writeBins,
     const Time& time,
     const label currentBinIndex
 )
@@ -424,6 +433,7 @@ void Foam::functionObjects::BBPA::writer::companion
 
     // The companion file IS the phase-mean product.
     if (!bi.products_.writeMean) return;
+    if (!writeBins[currentBinIndex]) return;    // outputSelection
 
     const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
     const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;

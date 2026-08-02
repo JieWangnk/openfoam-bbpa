@@ -109,13 +109,16 @@ ROWS = [
     ("old_and_new_name_conflict",
      BASE + "        discardCycles 1;\n        startCycle 1;\n",
      "deprecated spelling", 1.0),
-    ("unknown_phaseSelection_mode",
-     BASE + "        phaseSelection { mode everything; }\n",
-     "unknown phaseSelection mode", 1.0),
-    ("phaseSelection_and_old_bins",
-     BASE + "        phaseSelection { mode list; bins (2); }\n"
+    ("unknown_accumulation_mode",
+     BASE + "        accumulationSelection { mode everything; }\n",
+     "unknown accumulationSelection mode", 1.0),
+    ("accumulation_and_old_bins",
+     BASE + "        accumulationSelection { mode list; bins (2); }\n"
             "        binsOfInterest (2);\n",
      "not both", 1.0),
+    ("renamed_phaseSelection",
+     BASE + "        phaseSelection { mode all; }\n",
+     "split into two controls", 1.0),
     ("unknown_binAlignment",
      BASE + "        binAlignment middle;\n",
      "unknown binAlignment", 1.0),
@@ -142,6 +145,23 @@ ROWS = [
     ("negative_cycleWriteInterval",
      BASE + "        output { cycleWriteInterval -2; }\n",
      "must be >= 0", 1.0),
+    # --- three-control selection rows ---
+    ("output_not_subset",
+     BASE + "        accumulationSelection { mode list; bins (2 5); }\n"
+            "        outputSelection { mode list; bins (2 3); }\n",
+     "not in the accumulation selection", 1.0),
+    ("unknown_outputSelection_mode",
+     BASE + "        outputSelection { mode some; }\n",
+     "unknown outputSelection mode", 1.0),
+    ("output_all_sparse_accumulation",
+     BASE + "        accumulationSelection { mode list; bins (2 5); }\n"
+            "        outputSelection { mode all; }\n",
+     "only accumulated bins", 1.0),
+    ("phaseGrid_and_flat",
+     "        fields (U);\n"
+     "        phaseGrid { period 1.0; nBins 8; }\n"
+     "        period 1.0;\n",
+     "not both", 1.0),
 ]
 
 

@@ -217,14 +217,16 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
     {
         writer::flushClosedBins
         (
-            *iter(), time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), outputBinMap_, time_, cycleStart, binDeltaT_, now,
+            skip, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
         writer::flushClosedBins
         (
-            *iter(), time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), outputBinMap_, time_, cycleStart, binDeltaT_, now,
+            skip, centreOffset
         );
     }
 }
@@ -357,7 +359,7 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
     {
         writer::phaseAligned
         (
-            *iter(), 
+            *iter(), outputBinMap_, 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -374,7 +376,7 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
     {
         writer::phaseAligned
         (
-            *iter(), 
+            *iter(), outputBinMap_, 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -393,14 +395,14 @@ void Foam::functionObjects::BBPA::writeCompanionAllFields()
         HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter
     )
     {
-        writer::companion(*iter(), time_, currentBin_);
+        writer::companion(*iter(), outputBinMap_, time_, currentBin_);
     }
     forAllConstIter
     (
         HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter
     )
     {
-        writer::companion(*iter(), time_, currentBin_);
+        writer::companion(*iter(), outputBinMap_, time_, currentBin_);
     }
 }
 
@@ -517,8 +519,43 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             fieldOptions_.set(fname, fd);
         }
     }
-    dict.lookup("period") >> period_;
-    nBins_ = dict.lookupOrDefault("nBins", 100);
+    // The phase grid may be grouped in a phaseGrid{} sub-dictionary
+    // (period, nBins, phaseOrigin, binAlignment) or given flat; not both.
+    const dictionary* gridPtr = &dict;
+    if (dict.found("phaseGrid"))
+    {
+        if
+        (
+            dict.found("period") || dict.found("nBins")
+         || dict.found("phaseOrigin") || dict.found("binAlignment")
+        )
+        {
+            FatalErrorInFunction
+                << "give the phase grid either in phaseGrid{} or as flat "
+                << "entries, not both."
+                << exit(FatalError);
+        }
+        gridPtr = &dict.subDict("phaseGrid");
+        forAllConstIter(dictionary, *gridPtr, iter)
+        {
+            const word& k = iter().keyword();
+            if
+            (
+                k != "period" && k != "nBins"
+             && k != "phaseOrigin" && k != "binAlignment"
+            )
+            {
+                FatalErrorInFunction
+                    << "unknown phaseGrid entry '" << k << "'; valid: "
+                    << "period, nBins, phaseOrigin, binAlignment."
+                    << exit(FatalError);
+            }
+        }
+    }
+    const dictionary& grid = *gridPtr;
+
+    grid.lookup("period") >> period_;
+    nBins_ = grid.lookupOrDefault("nBins", 100);
 
     // v2 names, with one release of compatibility for the deprecated ones.
     // Each old name still works alone (with a warning); giving old and new
@@ -581,26 +618,40 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             << exit(FatalError);
     }
 
-    // Phase selection: which bins are tracked.
-    //   phaseSelection { mode all; }                     all nBins (default)
-    //   phaseSelection { mode list; bins (2 5); }        sparse-bin mode
-    //   phaseSelection { mode solverWriteTimes; }        bins derived from
-    //                                                    the solver's writes
+    // Accumulation selection: which bins EXIST IN MEMORY (and hence in
+    // the statistics). Separate from outputSelection, which decides which
+    // accumulated bins reach disk.
+    //   accumulationSelection { mode all; }              all nBins (default)
+    //   accumulationSelection { mode list; bins (2 5); } sparse-bin mode
+    //   accumulationSelection { mode solverWriteTimes; } derived from the
+    //                                                    solver's writes
     // Deprecated spellings (one release): binsOfInterest (= mode list),
     // binsAtWriteTimes (= mode solverWriteTimes).
     binsOfInterest_.clear();
     binsAtWriteTimes_ = false;
+
+    // 'phaseSelection' conflated two different decisions and was renamed
+    // before any release; abort rather than silently ignore the entry.
     if (dict.found("phaseSelection"))
+    {
+        FatalErrorInFunction
+            << "'phaseSelection' was split into two controls: which bins "
+            << "are CALCULATED is accumulationSelection{}; which "
+            << "accumulated bins are WRITTEN is outputSelection{}."
+            << exit(FatalError);
+    }
+
+    if (dict.found("accumulationSelection"))
     {
         if (dict.found("binsOfInterest") || dict.found("binsAtWriteTimes"))
         {
             FatalErrorInFunction
-                << "give either 'phaseSelection' or the deprecated "
+                << "give either 'accumulationSelection' or the deprecated "
                 << "'binsOfInterest'/'binsAtWriteTimes' entries, not both."
                 << exit(FatalError);
         }
 
-        const dictionary& ps = dict.subDict("phaseSelection");
+        const dictionary& ps = dict.subDict("accumulationSelection");
         const word mode(ps.lookupOrDefault<word>("mode", word("all")));
 
         if (mode == "list")
@@ -614,7 +665,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         else if (mode != "all")
         {
             FatalErrorInFunction
-                << "unknown phaseSelection mode '" << mode
+                << "unknown accumulationSelection mode '" << mode
                 << "'; valid values: all, list, solverWriteTimes."
                 << exit(FatalError);
         }
@@ -625,14 +676,16 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         {
             WarningInFunction
                 << "BBPA entry 'binsOfInterest' is deprecated; use "
-                << "phaseSelection { mode list; bins (...); }." << endl;
+                << "accumulationSelection { mode list; bins (...); }."
+                << endl;
             binsOfInterest_ = dict.lookup<labelList>("binsOfInterest");
         }
         if (dict.found("binsAtWriteTimes"))
         {
             WarningInFunction
                 << "BBPA entry 'binsAtWriteTimes' is deprecated; use "
-                << "phaseSelection { mode solverWriteTimes; }." << endl;
+                << "accumulationSelection { mode solverWriteTimes; }."
+                << endl;
             binsAtWriteTimes_ =
                 dict.lookup<Switch>("binsAtWriteTimes");
         }
@@ -842,7 +895,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     // than for the other entries: 'startTime' is ALSO the standard
     // function-object scheduling entry (when execution begins), so the
     // same word meant two different things in one dictionary.
-    if (dict.found("phaseOrigin"))
+    if (grid.found("phaseOrigin"))
     {
         if (dict.found("startTime"))
         {
@@ -851,7 +904,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 << "'startTime' given; keep only 'phaseOrigin'."
                 << exit(FatalError);
         }
-        startTime_ = dict.lookup<scalar>("phaseOrigin");
+        startTime_ = grid.lookup<scalar>("phaseOrigin");
         phaseOriginExplicit_ = true;
     }
     else if (dict.found("startTime"))
@@ -877,7 +930,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
     // lag). Deprecated spelling (one release): binCentred yes/no.
     // (binsAtWriteTimes_ itself was resolved by the phaseSelection block.)
     binCentred_ = false;
-    if (dict.found("binAlignment"))
+    if (grid.found("binAlignment"))
     {
         if (dict.found("binCentred"))
         {
@@ -886,7 +939,7 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 << "'binCentred' given; keep only 'binAlignment'."
                 << exit(FatalError);
         }
-        const word a(dict.lookup("binAlignment"));
+        const word a(grid.lookup("binAlignment"));
         if (a == "centred")
         {
             binCentred_ = true;
@@ -1053,6 +1106,202 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         }
     }
 
+    // Output selection: which ACCUMULATED bins reach disk. A subset of
+    // the accumulation selection; unlike it, freely changeable across a
+    // restart (it gates serialisation only, never a statistic).
+    outputBins_.clear();
+    if (dict.found("outputSelection"))
+    {
+        const dictionary& os = dict.subDict("outputSelection");
+
+        forAllConstIter(dictionary, os, iter)
+        {
+            const word& k = iter().keyword();
+            if (k != "mode" && k != "bins")
+            {
+                FatalErrorInFunction
+                    << "unknown outputSelection entry '" << k
+                    << "'; valid: mode, bins."
+                    << exit(FatalError);
+            }
+        }
+
+        const word mode(os.lookupOrDefault<word>("mode", word("accumulated")));
+
+        if (mode == "list")
+        {
+            outputBins_ = os.lookup<labelList>("bins");
+            forAll(outputBins_, k)
+            {
+                const label b = outputBins_[k];
+                if (b < 0 || b >= nBins_)
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is out of range [0," << nBins_ << ")"
+                        << exit(FatalError);
+                }
+                if
+                (
+                    !binsOfInterest_.empty()
+                 && findIndex(binsOfInterest_, b) < 0
+                )
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b << " is not in the "
+                        << "accumulation selection -- only accumulated "
+                        << "bins can be written."
+                        << exit(FatalError);
+                }
+            }
+        }
+        else if (mode == "all")
+        {
+            if (!binsOfInterest_.empty())
+            {
+                FatalErrorInFunction
+                    << "outputSelection mode 'all' requires "
+                    << "accumulationSelection mode 'all' -- only "
+                    << "accumulated bins can be written."
+                    << exit(FatalError);
+            }
+        }
+        else if (mode != "accumulated")
+        {
+            FatalErrorInFunction
+                << "unknown outputSelection mode '" << mode
+                << "'; valid values: accumulated, all, list."
+                << exit(FatalError);
+        }
+    }
+
+    // Per-bin gates: accumulation (memory/statistics) and output (disk).
+    activeBinMap_ = boolList(nBins_, binsOfInterest_.empty());
+    forAll(binsOfInterest_, k)
+    {
+        activeBinMap_[binsOfInterest_[k]] = true;
+    }
+    if (outputBins_.empty())
+    {
+        outputBinMap_ = activeBinMap_;
+    }
+    else
+    {
+        outputBinMap_ = boolList(nBins_, false);
+        forAll(outputBins_, k)
+        {
+            outputBinMap_[outputBins_[k]] = true;
+        }
+
+        WarningInFunction
+            << "outputSelection is narrower than the accumulation: bins "
+            << "that are accumulated but not written have no on-disk "
+            << "checkpoint state and will COLD-START on a restart." << endl;
+    }
+
+    // Output selection: which ACCUMULATED bins reach disk. Parsed after
+    // the solverWriteTimes derivation so the subset check sees the
+    // RESOLVED accumulation set. Unlike the accumulation selection this
+    // may change across a restart (it gates serialisation only) -- but a
+    // bin accumulated and never written has no on-disk state, so it is
+    // not restart-recoverable (warned below).
+    outputBins_.clear();
+    if (dict.found("outputSelection"))
+    {
+        const dictionary& os = dict.subDict("outputSelection");
+
+        forAllConstIter(dictionary, os, iter)
+        {
+            const word& k = iter().keyword();
+            if (k != "mode" && k != "bins")
+            {
+                FatalErrorInFunction
+                    << "unknown outputSelection entry '" << k
+                    << "'; valid: mode, bins."
+                    << exit(FatalError);
+            }
+        }
+
+        const word mode(os.lookupOrDefault<word>("mode", word("accumulated")));
+
+        if (mode == "list")
+        {
+            outputBins_ = os.lookup<labelList>("bins");
+
+            labelHashSet accumulated(binsOfInterest_);
+            labelHashSet seen;
+            forAll(outputBins_, k)
+            {
+                const label b = outputBins_[k];
+                if (b < 0 || b >= nBins_)
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is out of range [0," << nBins_ << ")"
+                        << exit(FatalError);
+                }
+                if (!seen.insert(b))
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is listed more than once."
+                        << exit(FatalError);
+                }
+                if (!binsOfInterest_.empty() && !accumulated.found(b))
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b << " is not in the "
+                        << "accumulation selection -- only accumulated "
+                        << "bins can be written."
+                        << exit(FatalError);
+                }
+            }
+        }
+        else if (mode == "all")
+        {
+            if (!binsOfInterest_.empty())
+            {
+                FatalErrorInFunction
+                    << "outputSelection mode 'all' requires "
+                    << "accumulationSelection mode 'all' -- bins that are "
+                    << "not accumulated cannot be written."
+                    << exit(FatalError);
+            }
+        }
+        else if (mode != "accumulated")
+        {
+            FatalErrorInFunction
+                << "unknown outputSelection mode '" << mode
+                << "'; valid values: accumulated, all, list."
+                << exit(FatalError);
+        }
+    }
+
+    // Per-bin gate maps: accumulation (memory) and output (disk)
+    activeBinMap_ = boolList(nBins_, binsOfInterest_.empty());
+    forAll(binsOfInterest_, k)
+    {
+        activeBinMap_[binsOfInterest_[k]] = true;
+    }
+
+    if (outputBins_.empty())
+    {
+        outputBinMap_ = activeBinMap_;
+    }
+    else
+    {
+        outputBinMap_ = boolList(nBins_, false);
+        forAll(outputBins_, k)
+        {
+            outputBinMap_[outputBins_[k]] = true;
+        }
+
+        WarningInFunction
+            << "outputSelection is narrower than the accumulation: bins "
+            << "that are accumulated but never written have no on-disk "
+            << "state and will cold-start on a restart." << endl;
+    }
+
     phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
     clock_.reset(period_, nBins_, startTime_, binCentred_);
 
@@ -1132,6 +1381,10 @@ bool Foam::functionObjects::BBPA::execute()
 
         if (segCycle < startCycle_) continue;
         if (limited && segCycle >= limit) continue;
+
+        // untracked bin: the phase clock has done its work; skip even
+        // the field lookups (no field-sized arithmetic for this segment)
+        if (!activeBinMap_[segs_[i].bin]) continue;
 
         currentBin_ = segs_[i].bin;
         accumulateAllFields(currentBin_, segs_[i].dt);

@@ -55,7 +55,7 @@ ABORT_ROWS = [
     ("nBins",       _body(),                     _body("        nBins           10;\n").replace("nBins           8;\n", ""),  "'nBins' changed"),
     ("period",      _body(),                     _body().replace("period          1.0;", "period          0.5;"),             "'period' changed"),
     ("alignment",   _body(),                     _body("        binAlignment    centred;\n"),                                 "'binAlignment' changed"),
-    ("selection",   _body(),                     _body("        phaseSelection { mode list; bins (2 5); }\n"),                "phase selection changed"),
+    ("selection",   _body(),                     _body("        accumulationSelection { mode list; bins (2 5); }\n"),                "phase selection changed"),
     ("phaseOrigin", _body(),                     _body().replace("phaseOrigin     0;", "phaseOrigin     0.25;"),              "phase origin changed"),
     ("fieldGone",   _body().replace("fields          (U);", "fields          (U p);"),
                     _body(),                                                                                                   "no longer in the 'fields' list"),

@@ -25,6 +25,7 @@ for t in \
     test_products \
     test_restartMeta \
     test_output \
+    test_selection \
     test_parallel \
     test_memory \
     test_invalidInput

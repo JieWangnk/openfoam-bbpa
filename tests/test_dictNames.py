@@ -8,7 +8,7 @@ names and once with the DEPRECATED spellings:
 
   new:  discardCycles 1; maxCycles 4; phaseOrigin 0;
         meanWriteIntervalCycles 1; binAlignment left;
-        phaseSelection { mode list; bins (1 4 6); }
+        accumulationSelection { mode list; bins (1 4 6); }
   old:  startCycle 1;    cycles 4;    startTime 0;
         PAwriteInterval 1;           binCentred no;
         binsOfInterest (1 4 6);
@@ -47,7 +47,7 @@ NEW_BODY = """        fields          (U);
         phaseOrigin     0;
         meanWriteIntervalCycles 1;
         binAlignment    left;
-        phaseSelection { mode list; bins (1 4 6); }
+        accumulationSelection { mode list; bins (1 4 6); }
         executeControl  timeStep;
         executeInterval 1;
         writeControl    writeTime;

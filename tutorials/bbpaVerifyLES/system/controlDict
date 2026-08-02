@@ -97,7 +97,7 @@ functions
         // 25 of 100, each landing in a write folder. A hand list silently
         // rots the moment nBins or writeInterval changes. Centred bins
         // remove the half-bin phase lag at source.
-        phaseSelection  { mode solverWriteTimes; }
+        accumulationSelection { mode solverWriteTimes; }
         binAlignment    centred;
 
         output

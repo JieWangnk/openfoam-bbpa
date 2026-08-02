@@ -103,6 +103,21 @@ class BBPA
         //   systole, post-peak deceleration) are needed at large I.
         labelList binsOfInterest_;
 
+        //- Which ACCUMULATED bins reach disk (outputSelection; empty =
+        //  all accumulated bins). Must be a subset of the accumulation
+        //  selection; unlike it, this may change across a restart -- it
+        //  gates serialisation only, never a statistic. Bins accumulated
+        //  but not written are NOT restart-recoverable (warned at read).
+        labelList outputBins_;
+
+        //- Per-bin accumulation gate (true = this bin exists in memory);
+        //  lets execute() skip even the field lookups for segments whose
+        //  bin is not tracked
+        boolList activeBinMap_;
+
+        //- Per-bin output gate for the writer (true = may be written)
+        boolList outputBinMap_;
+
         //- Number of cycles to average (-1 for all)
         label cycles_;
 
@@ -460,6 +475,7 @@ class BBPA
             static void phaseAligned
             (
                 const binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const label nBins,
                 const label currentCycle,
@@ -479,6 +495,7 @@ class BBPA
             static void companion
             (
                 const binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const label currentBinIndex
             );
@@ -510,6 +527,7 @@ class BBPA
             static void flushClosedBins
             (
                 binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,

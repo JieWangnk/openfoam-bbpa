@@ -47,12 +47,22 @@ function-object scheduling entry), `discardCycles` (skip startup cycles),
 ### Which bins
 
 ```
-phaseSelection { mode all; }                      // every bin (default)
-phaseSelection { mode list; bins (2 5); }         // a sparse subset
-phaseSelection { mode solverWriteTimes; }         // derived from the solver
+accumulationSelection { mode all; }                // every bin (default)
+accumulationSelection { mode list; bins (2 5); }   // a sparse subset
+accumulationSelection { mode solverWriteTimes; }   // derived from the solver
+
+outputSelection { mode accumulated; }              // write all accumulated
+outputSelection { mode list; bins (2 5); }         // write a subset of them
 ```
 
-`solverWriteTimes` (used here) requires the solver's `writeControl
+`accumulationSelection` decides which bins EXIST IN MEMORY (it shapes the
+statistics and is locked by the restart signature); `outputSelection`
+decides which accumulated bins reach DISK (a serialisation choice — it may
+change across a restart, but bins never written have no on-disk state and
+cold-start on restart). `solverWriteTimes` is a co-location convenience
+for tutorials; publication runs should use explicit `list` indices.
+
+`solverWriteTimes` requires the solver's `writeControl
 runTime|adjustableRunTime` with `writeInterval` an integer multiple of the
 bin width — then every bin label coincides with a solver write directory
 and the phase-averaged fields land beside `U` and `p`. `binAlignment

@@ -133,19 +133,35 @@ functions
             wallShearStress { crossCycleVariance off; }
         );
 
-        // the phase grid
-        period          1.0;      // cycle period [s]
-        nBins           50;       // bin width = period/nBins
-        phaseOrigin     0;        // omit to auto-align to a cycle boundary
+        // the phase grid (groupable in a phaseGrid{} sub-dict, or flat)
+        phaseGrid
+        {
+            period          1.0;  // cycle period [s]
+            nBins           50;   // bin width = period/nBins
+            phaseOrigin     0;    // omit to auto-align to a cycle boundary
+            binAlignment    left; // | centred: shifts the integration
+                                  //   WINDOW to [t_j - Δ/2, t_j + Δ/2)
+                                  //   (labels stay on the grid); it is a
+                                  //   different partition, no relabel
+        }
         discardCycles   2;        // skip startup cycles
         maxCycles       -1;       // stop after N complete cycles (-1 = all)
 
-        // which bins, and window placement
-        phaseSelection  { mode all; }   // | list; bins (…) | solverWriteTimes
-        binAlignment    left;           // | centred: shifts the integration
-                                        //   WINDOW to [t_j - Δ/2, t_j + Δ/2)
-                                        //   (labels stay on the grid); it is
-                                        //   a different partition, no relabel
+        // which bins are CALCULATED (exist in memory; shapes the
+        // statistics; locked by the restart signature)
+        accumulationSelection
+        {
+            mode        all;      // | list; bins (…) | solverWriteTimes
+        }
+
+        // which ACCUMULATED bins are WRITTEN (serialisation only; may
+        // change across a restart; must be a subset of the accumulation.
+        // NB: a bin accumulated but never written has no on-disk state
+        // and cold-starts on restart)
+        outputSelection
+        {
+            mode        accumulated;   // | all | list; bins (…)
+        }
 
         // WHERE and WHEN (never changes the numbers)
         output
@@ -181,8 +197,11 @@ counters, weights). On restart, any change that alters accumulator shape or
 meaning **aborts naming the entry**: period, `nBins`, `binAlignment`, the
 phase selection, an explicit `phaseOrigin` that contradicts the checkpoint,
 a removed field or changed type, a product turned on without history.
-Turning a product off warns and discards. `tests/test_restart.py` proves
-continuous == restarted exactly.
+Turning a product off warns and discards, and `outputSelection` may
+change freely (it gates serialisation, never a statistic) — though a bin
+that was accumulated and never written has no on-disk state and
+cold-starts. `tests/test_restart.py` proves continuous == restarted
+exactly.
 
 ### Migration from the v1 dictionary
 
@@ -194,8 +213,8 @@ replacement; old + new together aborts.
 | `startTime` | `phaseOrigin` (the old word collided with the standard function-object scheduling entry) |
 | `startCycle` | `discardCycles` |
 | `cycles` | `maxCycles` |
-| `binsOfInterest (…)` | `phaseSelection { mode list; bins (…); }` |
-| `binsAtWriteTimes` | `phaseSelection { mode solverWriteTimes; }` |
+| `binsOfInterest (…)` | `accumulationSelection { mode list; bins (…); }` |
+| `binsAtWriteTimes` | `accumulationSelection { mode solverWriteTimes; }` |
 | `binCentred` | `binAlignment centred` |
 | `PAwriteInterval` | `output { meanWriteIntervalCycles …; }` |
 | `writeMode phaseAlignedDirs / perCycle / companion / both` | `output { layout …; cycleWriteInterval …; }` |
