@@ -5,6 +5,10 @@ produces phase-averaged mean, cross-cycle variance, and resolved turbulent
 kinetic energy directly in memory, without writing terabytes of transient
 snapshots.
 
+This branch (`of14-port`) is **BBPA v2 on OpenFOAM Foundation v14**; `main`
+carries the v1 implementation on Foundation v12. The v2 dictionary interface
+below is **frozen** as of tag `of14-v2.0`.
+
 For the theory, error analysis, and cardiovascular LES validation see the
 companion paper:
 
@@ -13,168 +17,191 @@ companion paper:
 > validation.* Computers & Fluids (2026, submitted). Paper repo:
 > [`Bin-Phase-Average`](https://github.com/JieWangnk/Bin-Phase-Average)
 
+## Frozen definitions
+
+These definitions are the contract. No output option changes them; the test
+suite (`tests/`) asserts them against algorithm-independent closed forms at
+machine precision.
+
+For field *q*, cycle *c*, and phase bin *j* with window *I<sub>c,j</sub>*:
+
+```
+q_Bin[c,j]   = ( ∫_{I(c,j)} q(t) dt ) / W[c,j],      W[c,j] = ∫_{I(c,j)} dt
+q_BinPA[j,N] = (1/N) · Σ_{c=1..N} q_Bin[c,j]
+```
+
+| Product | File | Meaning (unambiguous) |
+|---|---|---|
+| per-cycle bin mean | `<q>_Bin` | the just-completed cycle's own time-integrated bin mean — **never** blended into the cross-cycle mean |
+| per-cycle second moment | `<q>_Bin_UU` | the same cycle's bin mean of *q⊗q* |
+| cross-cycle mean | `<q>_PA` | equal-weight mean of the completed cycles' `_Bin` values |
+| cross-cycle second moment | `<q>_PA_UU` | equal-weight mean of the per-cycle second moments; Reynolds stress `R = ⟨q⊗q⟩ − ⟨q⟩⊗⟨q⟩` and TKE `½·tr(R)` follow offline |
+| cross-cycle variance | `<q>_PAVariance` | Welford `M₂/(N−1)` of the per-cycle bin means (true inner-product recurrence `M₂ += δ·δ′`; defined for N ≥ 2) |
+
+Time integration assigns each solver step to the bin containing its **end**
+time, with a boundary snap (1e-9 in bin units) that makes the assignment
+immune to accumulated floating-point clock drift. A step that straddles a
+bin edge is therefore credited whole to its end bin: bin *weights* deviate
+by at most one step per cycle (measured and bounded in
+`tests/test_variableDt.py`), while bin *means* remain exact for
+bin-resolved signals. The in-progress cycle is **never** blended into any
+cross-cycle product, in any output layout.
+
 ## Features
 
 | | BBPA | `fieldAverage` (OpenFOAM-native) | Classical offline PA |
 |---|---|---|---|
 | Phase-centred ensemble mean | ✅ | ✗ (causal running filter) | ✅ |
 | In-situ (no snapshot I/O) | ✅ | ✅ | ✗ (terabytes of writes) |
-| Raw 2nd moment `⟨UᵢUⱼ⟩` → Reynolds stress / TKE | ✅ (`_PA_UU`, reconstructed offline) | ✗ | ✅ (offline) |
+| Raw 2nd moment `⟨UᵢUⱼ⟩` → Reynolds stress / TKE | ✅ | ✗ | ✅ (offline) |
 | Cross-cycle variance | ✅ (Welford) | partial (`UPrime2Mean`) | ✅ |
-| Wall shear stress binning | ✅ (lazy init) | ✅ | ✅ |
-| Output per bin | phase-aligned time directories | single time dir | per-phase dir |
-| Memory | `O(I)` per field | `O(1)` per field | n/a |
+| Per-field product selection (memory-gated) | ✅ | ✅ | n/a |
+| Restart-safe, with a strict config signature | ✅ | partial | n/a |
 | Overhead (8.2M-cell LES, 200 cores) | **+0.67%** at I=100 (95% CI [0.2,1.1]%) | baseline | +100%+ (post-run) |
 
-Accompanying `IPA` (Instantaneous Phase Averaging) function object samples at
-exact phase crossings without binning — a zero-width limit of BBPA for
-reference comparisons.
+The accompanying `IPA` function object samples at exact phase crossings
+without binning — a zero-width limit of BBPA for reference comparisons.
 
-## What gets written
+## Requirements and build
 
-For each tracked vector/scalar field `φ` (e.g. `U`, `p`, `wallShearStress`),
-at every solver writeTime, BBPA produces three fields in each
-phase-aligned time directory `t_j = t_0 + j · (T/I)`:
-
-| File | Contents | Units |
-|---|---|---|
-| `<φ>_PA` | Phase-average `⟨φ⟩_j` | same as `φ` |
-| `<φ>_PAVariance` | Cross-cycle variance `M₂/(N−1)` of the bin mean | `dim(φ)²` |
-| `<φ>_PA_UU` | Raw second moment `⟨φ⊗φ⟩_j` (symmetric tensor `⟨UᵢUⱼ⟩` for a vector field; `⟨φ²⟩_j` for a scalar) | `dim(φ)²` |
-
-For a vector field, the Reynolds-stress tensor `R_ij = ⟨UᵢUⱼ⟩ − ⟨Uᵢ⟩⟨Uⱼ⟩`
-and the turbulent kinetic energy `k = ½ tr(R)` are reconstructed from
-`_PA_UU` and `_PA` in post-processing. (Saving the raw tensor rather than a
-pre-reduced TKE keeps the full Reynolds-stress information.) At finite `I`
-these are bin-conditioned quantities that approach the pointwise
-phase-ensemble values as `I → ∞`. For a scalar field, `_PA_UU` reduces to
-`⟨φ²⟩_j`, from which the within-bin variance `⟨φ²⟩ − ⟨φ⟩²` follows.
-
-## Requirements
-
-- OpenFOAM Foundation **v12** (openfoam.org)
-- GCC ≥ 9, OpenMPI / equivalent
-
-Tested on:
-- Ubuntu 24.04 (system OpenFOAM 12)
-- csf3 (`apps/gcc/openfoam/12`, GCC 13.3.0)
-- csf4 (`openfoam/12-foss-2023a`, GCC 12.3.0)
-
-## Build
+OpenFOAM Foundation **v14** (openfoam.org), GCC ≥ 9, OpenMPI or equivalent.
 
 ```bash
-git clone https://github.com/JieWangnk/openfoam-bbpa.git
-cd openfoam-bbpa/src/phaseAveraging
-wmake libso
-# writes $FOAM_USER_LIBBIN/libPhaseAveraging.so
+cd src/phaseAveraging
+wmake libso              # -> $FOAM_USER_LIBBIN/libPhaseAveraging.so
 ```
 
-## Quickstart — oscillating-lid cavity tutorial
-
-```bash
-cd tutorials/oscillatingLidCavity
-./Allrun
-paraview case.foam &
-# Time directories 0.0, 0.1, ..., 2.9 contain U_PA, p_PA, U_PA_UU, etc.
-```
-
-This 400-cell laminar case ends in ≈1 min and exercises the full pipeline:
-Strategy B phase-aligned output, Welford variance, second-moment accumulator.
-
-## Quickstart — stenosis-pipe tutorial
-
-A reduced version of the paper's §3 same-trajectory validation case: a
-`D = 5` mm pipe with a cosine-tapered 75 % area constriction at the midpoint,
-driven by a sinusoidal inlet `U = 0.3 + 0.3 sin(2πt)` (period `T = 1` s),
-WALE LES. The mesh is coarsened to ≈18 k cells and the run is 3 forcing
-periods, so it completes in ~30 min on 4 cores (the paper used a 256 k-cell
-mesh over 50 cycles).
-
-![Stenosis-pipe phase animation: instantaneous vs IPA vs BBPA](docs/stenosis_phase_animation.gif)
-
-*Mid-plane `|U|` over the cardiac phase. Top: instantaneous (one realisation —
-the post-throat shear-layer jet meanders). Middle: classical pointwise IPA.
-Bottom: BBPA. IPA and BBPA are phase-averaged over the two accumulated cycles
-and are visibly smoother than the single instantaneous realisation.*
-
-```bash
-cd tutorials/stenosisPipe
-./Allrun                       # blockMesh -> decomposePar -> foamRun (4 cores) -> reconstructPar
-touch case.foam; paraview case.foam &
-```
-
-The case runs **BBPA and IPA on the same trajectory**. BBPA uses `writeMode
-companion`, so each time directory holds the instantaneous `U` **and** that
-phase's bin `U_PA` (+ `U_PA_UU`, `U_PAVariance`) together, and the output
-reconstructs cleanly in parallel. From `U_PA_UU` and `U_PA` you get the Reynolds
-stress `R_ij = U_PA_UU - U_PA⊗U_PA` and TKE `= ½ tr(R)`. IPA writes its 50 phase
-fields `U_IPA_phase{0..49}` at the cycle ends. Both use `period 1.0`,
-`nBins`/`nPhases 50`, `startCycle 1` (first forcing period discarded as the
-start-up transient).
-
-Build the 3-panel phase animation above from the finished case with:
-
-```bash
-python3 ../../scripts/make_phase_animation.py .   # needs pyvista + imageio
-```
-
-Edit `system/decomposeParDict` to change the core count, or set
-`numberOfSubdomains 1` and replace the parallel lines in `Allrun` with
-`runApplication $(getApplication)` to run serially (then BBPA's
-`phaseAlignedDirs` mode also works without the per-processor nesting).
-
-## Usage in your own case
-
-In `system/controlDict`:
+## The v2 dictionary
 
 ```c
-libs ("libPhaseAveraging.so");
-
 functions
 {
-    #includeFunc wallShearStress    // if tracking WSS: list BEFORE bbpa
+    #includeFunc wallShearStress    // producers of derived fields BEFORE bbpa
 
     bbpa
     {
         type            BBPA;
         libs            ("libPhaseAveraging.so");
+
+        // scheduling: accumulate EVERY step (BBPA is a time integrator,
+        // not a write-time sampler); write on the solver's writes
         executeControl  timeStep;
         executeInterval 1;
-        writeControl    writeTime;       // fire on solver writeTimes
-        fields          (U p wallShearStress);
-        period          1.0;             // cardiac cycle (s)
-        nBins           50;              // I
-        startCycle      2;               // skip transient
+        writeControl    writeTime;
+
+        // WHAT exists: per-field products (a plain name = all defaults)
+        fields
+        (
+            U
+            p               { secondMoment off; crossCycleVariance off; }
+            wallShearStress { crossCycleVariance off; }
+        );
+
+        // the phase grid
+        period          1.0;      // cycle period [s]
+        nBins           50;       // bin width = period/nBins
+        phaseOrigin     0;        // omit to auto-align to a cycle boundary
+        discardCycles   2;        // skip startup cycles
+        maxCycles       -1;       // stop after N complete cycles (-1 = all)
+
+        // which bins, and window placement
+        phaseSelection  { mode all; }   // | list; bins (…) | solverWriteTimes
+        binAlignment    left;           // | centred (window centred on label)
+
+        // WHERE and WHEN (never changes the numbers)
+        output
+        {
+            layout                  phaseAligned;  // | companion | both
+            cycleWriteInterval      1;   // 0 = every write; N = every N cycles
+            meanWriteIntervalCycles 1;   // <= 0 = final write only
+            writeFinal              true;
+            writeProperties         true;  // off = no restart checkpoint
+        }
     }
 }
 ```
 
-Optional keys:
-- `startTime <s>` — explicit phase origin; defaults to `floor(t/period)*period`
-- `cycles <N>` — stop averaging after N cycles; defaults to unlimited
+### Per-field product options
 
-See `src/phaseAveraging/exampleDict_BBPA` and `exampleDict_IPA` for full
-dictionaries.
+| option | default | kind | effect |
+|---|---|---|---|
+| `writePhaseMean` | on | output | write `_PA`. The mean itself **always** accumulates; with the variance on and this off, the mean persists as the checkpoint-only `_PAmeanState` |
+| `secondMoment` | on | calculation | allocate + accumulate `⟨q⊗q⟩`, write `_PA_UU`/`_Bin_UU`. Off releases the dominant per-bin memory (measured: 90 MB at 500 bins × 1600 cells, vector) |
+| `crossCycleVariance` | on | calculation | allocate + accumulate Welford `M₂`, write `_PAVariance` |
+| `writePerCycle` | off | output | keep + write the completed cycle's `_Bin`/`_Bin_UU`, flushed as each bin's window closes (restart-safe at write granularity) |
 
-## Scripts
+### Restart
 
-| `scripts/bench_overhead.py` | Parse matched-pair logs (with/without BBPA) and report per-step walltime + overhead % |
-| `scripts/screenshot_WSS_BPM120.py` | pvbatch renderer for WSS-filter-width 3-panel figure (paper Fig. X) |
+Every checkpoint carries a configuration signature (format version, period,
+phase origin, bins, alignment, selection, per-field types and products,
+counters, weights). On restart, any change that alters accumulator shape or
+meaning **aborts naming the entry**: period, `nBins`, `binAlignment`, the
+phase selection, an explicit `phaseOrigin` that contradicts the checkpoint,
+a removed field or changed type, a product turned on without history.
+Turning a product off warns and discards. `tests/test_restart.py` proves
+continuous == restarted exactly.
+
+### Migration from the v1 dictionary
+
+Deprecated spellings work for one release, each warning with its
+replacement; old + new together aborts.
+
+| deprecated | v2 |
+|---|---|
+| `startTime` | `phaseOrigin` (the old word collided with the standard function-object scheduling entry) |
+| `startCycle` | `discardCycles` |
+| `cycles` | `maxCycles` |
+| `binsOfInterest (…)` | `phaseSelection { mode list; bins (…); }` |
+| `binsAtWriteTimes` | `phaseSelection { mode solverWriteTimes; }` |
+| `binCentred` | `binAlignment centred` |
+| `PAwriteInterval` | `output { meanWriteIntervalCycles …; }` |
+| `writeMode phaseAlignedDirs / perCycle / companion / both` | `output { layout …; cycleWriteInterval …; }` |
+| `writeMode bin` | per-field `writePerCycle on` (one naming: `_Bin` beside `_PA`) |
+
+## Tutorials — one job each
+
+Each case has a README stating its single job and an `Allrun`/`Allclean`.
+`tutorials/bbpaVerify/README.md` is the full dictionary reference.
+
+| case | one job |
+|---|---|
+| `bbpaVerify` | every dictionary control, hand-checkable (320 cells, ~10 s) |
+| `planarPoiseuille` | cross-cycle variance + restart (developing flow, non-zero variance) |
+| `oscillatingLidCavity` | field types + a derived boundary field, per-field products |
+| `stenosisPipe` | parallel production; serial == parallel; IPA comparison |
+| `bbpaVerifyLES` | adaptive time stepping + second-order statistics |
+
+## Verification
+
+`tests/` is an automated ground-truth suite (`./Alltest`, or
+`python3 -m pytest tests/`): a coded function object prescribes an analytic
+field, a bit-faithful Python replica of the accumulator replays the logged
+trajectory, and closed-form references check every product. 12 test files
+assert, at 1e-12 or bit-exact: the arithmetic, output-layout invariance
+(all layouts, identical numbers), restart == continuous, variable-dt
+behaviour and weight conservation, every dictionary option, per-field
+product manifests, serial == parallel, the strict restart metadata, the
+memory reduction, and that 19 invalid dictionaries abort with messages
+naming the entry.
 
 ## Implementation notes
 
-- **Welford M₂** for cross-cycle variance — numerically stable; avoids catastrophic cancellation when cycle-to-cycle differences are small.
-- **Lazy field lookup**: the field list is re-checked every `execute()`, so fields registered by other function objects (e.g. `wallShearStress`) are picked up even if BBPA is constructed before them.
-- **Strategy B output**: each bin writes to its own phase-aligned time directory, so `foamListTimes` / `foamToVTK` handle the output natively without special postprocessing.
-- **Partial-cycle second moment**: `_PA_UU` fires even on a single-cycle run (`binCounts_ == 0`) by falling through to the in-progress accumulators — eliminates endpoint-alignment gotchas.
+- One `phaseClock` owns every which-bin/which-cycle decision (BBPA and
+  IPA); `binIntegrator`/`cycleStatistics` hold the current-cycle and
+  cross-cycle state; a const-access `writer` serialises and a `state`
+  component inverts it on restart — the output layer cannot touch a
+  statistic by construction.
+- Products gate by **allocation**: an off product never allocates its
+  accumulators, so the same sparse-bin guards skip it everywhere.
+- Lazy field lookup: fields registered by other function objects
+  (`wallShearStress`) are picked up when they appear and restored against
+  the original checkpoint instant.
 
 ## License
 
 GPL-3.0 (same as OpenFOAM). See `LICENSE`.
 
 ## Citation
-
-If you use BBPA in your work, please cite the paper:
 
 ```bibtex
 @article{wang2026bbpa,
