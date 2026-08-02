@@ -52,6 +52,18 @@ template<class T> struct bbpaSqrTypeOf { typedef T type; };
 template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
 
 
+//- The cross-cycle variance file suffix. The Welford inner-product M2
+//  gives, for a vector field, the SCALAR TOTAL variance
+//  sum_i Var(U_i) = tr(C) -- the trace of the cross-cycle covariance
+//  tensor, deliberately named ...VarianceMag so it cannot be mistaken
+//  for a component-resolved variance or the covariance tensor itself.
+//  For a scalar field it is the ordinary variance, named ...Variance.
+template<class T>
+inline const char* bbpaVarianceSuffix() { return "Variance"; }
+template<>
+inline const char* bbpaVarianceSuffix<vector>() { return "VarianceMag"; }
+
+
 //- Which products a field carries (v2 per-field controls).
 //
 //  Calculation options gate by ALLOCATION: a product that is off never
@@ -76,7 +88,9 @@ struct binProducts
     //  _PA_UU / _Bin_UU
     bool secondMoment;
 
-    //- CALCULATION: accumulate the Welford M2 and write _PAVariance
+    //- CALCULATION: accumulate the Welford M2 and write the variance
+    //  file (_PAVariance for scalars; _PAVarianceMag -- the scalar
+    //  TOTAL variance sum_i Var(U_i) -- for vectors)
     bool crossCycleVariance;
 
     //- OUTPUT: keep + write the completed cycle's own bin value (_Bin)

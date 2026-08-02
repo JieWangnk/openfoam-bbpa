@@ -388,7 +388,7 @@ def _read_bin_record(tdir, suffix):
     rec = {}
     pPA = os.path.join(tdir, "U" + suffix)
     pUU = os.path.join(tdir, "U" + suffix + "_UU")
-    pVar = os.path.join(tdir, "U" + suffix + "Variance")
+    pVar = os.path.join(tdir, "U" + suffix + "VarianceMag")
     if os.path.isfile(pPA):
         rec["PA"] = bo.read_of_internal_first(pPA)
     if os.path.isfile(pUU):

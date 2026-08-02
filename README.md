@@ -7,7 +7,7 @@ snapshots.
 
 This branch (`of14-port`) is **BBPA v2 on OpenFOAM Foundation v14**; `main`
 carries the v1 implementation on Foundation v12. The v2 dictionary interface
-below is **frozen** as of tag `of14-v2.0`.
+below freezes at tag `of14-v2.0` (cut on the commit that carries it).
 
 For the theory, error analysis, and cardiovascular LES validation see the
 companion paper:
@@ -32,11 +32,11 @@ q_BinPA[j,N] = (1/N) · Σ_{c=1..N} q_Bin[c,j]
 
 | Product | File | Meaning (unambiguous) |
 |---|---|---|
-| per-cycle bin mean | `<q>_Bin` | the just-completed cycle's own time-integrated bin mean — **never** blended into the cross-cycle mean |
+| per-cycle bin mean | `<q>_Bin` | a single cycle's own time-integrated bin mean, written per bin as soon as that bin's **window closes** (a closed-bin current-cycle product; on restart, closed bins of the incomplete cycle are recovered from these files). At the cycle boundary the full set is the completed cycle's record. **Never** blended into the cross-cycle mean |
 | per-cycle second moment | `<q>_Bin_UU` | the same cycle's bin mean of *q⊗q* |
 | cross-cycle mean | `<q>_PA` | equal-weight mean of the completed cycles' `_Bin` values |
 | cross-cycle second moment | `<q>_PA_UU` | equal-weight mean of the per-cycle second moments; Reynolds stress `R = ⟨q⊗q⟩ − ⟨q⟩⊗⟨q⟩` and TKE `½·tr(R)` follow offline |
-| cross-cycle variance | `<q>_PAVariance` | Welford `M₂/(N−1)` of the per-cycle bin means (true inner-product recurrence `M₂ += δ·δ′`; defined for N ≥ 2) |
+| cross-cycle variance | `<q>_PAVariance` (scalar q) / `<q>_PAVarianceMag` (vector q) | Welford `M₂/(N−1)` of the per-cycle bin means (true inner-product recurrence `M₂ += δ·δ′`; defined for N ≥ 2). For a vector field this is the **scalar total variance** `Σᵢ Var(Uᵢ) = tr(C)` — the trace of the cross-cycle covariance tensor, named `…VarianceMag` so it cannot be mistaken for a component-resolved variance or the covariance tensor itself (neither is currently produced) |
 
 Each solver interval [t<sub>n</sub>, t<sub>n+1</sub>] is **split at every
 phase-bin or cycle boundary it crosses**; its contribution to bin
@@ -57,24 +57,50 @@ used **only to classify** times lying numerically on a boundary; it never
 assigns a straddling step whole to one bin. The in-progress cycle is
 **never** blended into any cross-cycle product, in any output layout.
 
+Two second-order statistics must not be confused. The **phase-conditioned
+resolved Reynolds stress** comes from the raw second moment,
+`R_j = ⟨U⊗U⟩_j − ⟨U⟩_j⊗⟨U⟩_j`, with resolved TKE `k_j = ½·tr(R_j)` —
+reconstructed offline from `_PA_UU` and `_PA`. The **cross-cycle
+variance** (`_PAVarianceMag`) instead quantifies cycle-to-cycle
+variability of the completed per-cycle bin means. They are different
+statistics and are not interchangeable.
+
 ## Features
 
 | | BBPA | `fieldAverage` (OpenFOAM-native) | Classical offline PA |
 |---|---|---|---|
-| Phase-centred ensemble mean | ✅ | ✗ (causal running filter) | ✅ |
-| In-situ (no snapshot I/O) | ✅ | ✅ | ✗ (terabytes of writes) |
-| Raw 2nd moment `⟨UᵢUⱼ⟩` → Reynolds stress / TKE | ✅ | ✗ | ✅ (offline) |
-| Cross-cycle variance | ✅ (Welford) | partial (`UPrime2Mean`) | ✅ |
+| Phase-binned ensemble mean (optional centred windows) | ✅ | ✗ (causal running filter) | ✅ |
+| In-situ (no snapshot I/O) | ✅ | ✅ | ✗ (snapshot storage) |
+| Raw 2nd moment `⟨UᵢUⱼ⟩` → Reynolds stress / TKE | ✅ | derivable from `UPrime2Mean` (unconditioned in phase) | ✅ (offline) |
+| Variance of completed cycle-bin means | ✅ (Welford) | ✗ (`UPrime2Mean` is a different statistic: the temporal prime-squared mean about a running average, not phase-conditioned) | ✅ |
 | Per-field product selection (memory-gated) | ✅ | ✅ | n/a |
 | Restart-safe, with a strict config signature | ✅ | partial | n/a |
-| Overhead (8.2M-cell LES, 200 cores) | **+0.67%** at I=100 (95% CI [0.2,1.1]%) | baseline | +100%+ (post-run) |
 
-The accompanying `IPA` function object samples at exact phase crossings
-without binning — a zero-width limit of BBPA for reference comparisons.
+**Measured overhead** (companion paper's benchmark): +0.67 % solver
+walltime per step, 95 % CI [0.2, 1.1] %, for `nBins 100` on an
+8.2M-cell cardiovascular LES over 200 ranks — matched-pair runs of the
+identical case with and without the BBPA function object
+(`scripts/bench_overhead.py` reports per-step walltime from the paired
+logs; repeats and method in the paper). A snapshot-based offline workflow
+shifts its cost into transient storage and post-processing instead of
+solver time; those costs depend on write frequency, filesystem and
+decomposition, and are quantified in the paper rather than summarised in
+one number here.
+
+The accompanying `IPA` function object provides exact-phase point
+sampling and is used as a narrow-window reference for BBPA convergence.
 
 ## Requirements and build
 
-OpenFOAM Foundation **v14** (openfoam.org), GCC ≥ 9, OpenMPI or equivalent.
+OpenFOAM Foundation **v14** (openfoam.org). Tested against:
+
+```
+OpenFOAM Foundation 14, patch 20260724 (Ubuntu package openfoam14)
+GCC 13.3.0, OpenMPI 4.1.6, Ubuntu 24.04
+```
+
+OpenFOAM 14 itself builds with C++14; other Foundation-supported
+toolchains are expected to work but are untested here.
 
 ```bash
 cd src/phaseAveraging
@@ -116,13 +142,20 @@ functions
 
         // which bins, and window placement
         phaseSelection  { mode all; }   // | list; bins (…) | solverWriteTimes
-        binAlignment    left;           // | centred (window centred on label)
+        binAlignment    left;           // | centred: shifts the integration
+                                        //   WINDOW to [t_j - Δ/2, t_j + Δ/2)
+                                        //   (labels stay on the grid); it is
+                                        //   a different partition, no relabel
 
         // WHERE and WHEN (never changes the numbers)
         output
         {
             layout                  phaseAligned;  // | companion | both
             cycleWriteInterval      1;   // 0 = every write; N = every N cycles
+                                         // (0 re-writes every bin's files each
+                                         //  time: finalised values idempotently,
+                                         //  not-yet-finalised bins with their
+                                         //  evolving running partial)
             meanWriteIntervalCycles 1;   // <= 0 = final write only
             writeFinal              true;
             writeProperties         true;  // off = no restart checkpoint
@@ -213,12 +246,16 @@ GPL-3.0 (same as OpenFOAM). See `LICENSE`.
 
 ## Citation
 
+The manuscript is under review; an archived, DOI-carrying release of this
+repository (e.g. via Zenodo) will accompany publication — until then, cite
+the submission and pin the git tag you used.
+
 ```bibtex
 @article{wang2026bbpa,
   author  = {Wang, Jie and Skillen, Alex and Revell, Alistair},
   title   = {Bin-based in-situ phase averaging for pulsatile internal-flow {LES}: error budget, {OpenFOAM} implementation, and validation},
   journal = {Computers \& Fluids},
   year    = {2026},
-  note    = {submitted}
+  note    = {Manuscript submitted for publication}
 }
 ```

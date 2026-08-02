@@ -264,7 +264,7 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
         {
             IOobject varIO
             (
-                fieldName + paSuffix + "Variance",
+                fieldName + paSuffix + bbpaVarianceSuffix<Type>(),
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,

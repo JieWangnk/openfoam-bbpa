@@ -310,7 +310,8 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
                 (
                     IOobject
                     (
-                        bi.fieldName_ + paSuffix + "Variance",
+                        bi.fieldName_ + paSuffix
+                      + bbpaVarianceSuffix<Type>(),
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,

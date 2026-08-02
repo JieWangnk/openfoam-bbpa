@@ -81,7 +81,7 @@ def _run(name, fields_line, end_time=END_TIME):
     return rundir
 
 
-def _manifest(rundir, names=("U_PA", "U_PA_UU", "U_PAVariance",
+def _manifest(rundir, names=("U_PA", "U_PA_UU", "U_PAVarianceMag",
                              "U_PAmeanState", "U_Bin", "p_PA", "p_PA_UU")):
     """How often each product file appears across the run's time dirs."""
     found = {f: 0 for f in names}
@@ -113,7 +113,7 @@ def run_rows():
     # -- plain wordList: back-compat, all products ---------------------------
     rd = _run("prod_plain", "fields          (U);")
     m = _manifest(rd)
-    if not (m["U_PA"] and m["U_PA_UU"] and m["U_PAVariance"]):
+    if not (m["U_PA"] and m["U_PA_UU"] and m["U_PAVarianceMag"]):
         errors.append(f"plain: expected all products, manifest {m}")
     _check_closed("plain", rv.read_bbpa_output(rd, FINAL_CS), closed,
                   ("PA", "PA_UU", "PAVariance"), errors)
@@ -123,7 +123,7 @@ def run_rows():
     m = _manifest(rd)
     if not m["U_PA"]:
         errors.append("meanOnly: U_PA missing")
-    if m["U_PA_UU"] or m["U_PAVariance"]:
+    if m["U_PA_UU"] or m["U_PAVarianceMag"]:
         errors.append(f"meanOnly: off products written, manifest {m}")
     _check_closed("meanOnly", rv.read_bbpa_output(rd, FINAL_CS), closed,
                   ("PA",), errors)
@@ -133,7 +133,7 @@ def run_rows():
     m = _manifest(rd)
     if not m["U_PA_UU"]:
         errors.append("sqrOnly: U_PA_UU missing")
-    if m["U_PA"] or m["U_PAVariance"] or m["U_PAmeanState"]:
+    if m["U_PA"] or m["U_PAVarianceMag"] or m["U_PAmeanState"]:
         errors.append(f"sqrOnly: off products written, manifest {m}")
     _check_closed("sqrOnly", rv.read_bbpa_output(rd, FINAL_CS), closed,
                   ("PA_UU",), errors)
@@ -141,7 +141,7 @@ def run_rows():
     # -- variance only (Choice A): no _PA file, meanState checkpoint ---------
     rd = _run("prod_varOnly", VAR_ONLY)
     m = _manifest(rd)
-    if not m["U_PAVariance"]:
+    if not m["U_PAVarianceMag"]:
         errors.append("varOnly: U_PAVariance missing")
     if not m["U_PAmeanState"]:
         errors.append("varOnly: U_PAmeanState checkpoint missing")
@@ -153,7 +153,7 @@ def run_rows():
     # -- mixed fields: per-field allocation independent ----------------------
     rd = _run("prod_mixed", MIXED)
     m = _manifest(rd)
-    if not (m["U_PA"] and m["U_PA_UU"] and m["U_PAVariance"] and m["p_PA"]):
+    if not (m["U_PA"] and m["U_PA_UU"] and m["U_PAVarianceMag"] and m["p_PA"]):
         errors.append(f"mixed: expected U all + p_PA, manifest {m}")
     if m["p_PA_UU"]:
         errors.append(f"mixed: p_PA_UU written though off, manifest {m}")
