@@ -103,11 +103,13 @@ class BBPA
         //   systole, post-peak deceleration) are needed at large I.
         labelList binsOfInterest_;
 
-        //- Which ACCUMULATED bins reach disk (outputSelection; empty =
-        //  all accumulated bins). Must be a subset of the accumulation
-        //  selection; unlike it, this may change across a restart -- it
-        //  gates serialisation only, never a statistic. Bins accumulated
-        //  but not written are NOT restart-recoverable (warned at read).
+        //- Which ACCUMULATED bins reach disk as PRODUCTS (outputSelection;
+        //  empty = all accumulated bins). Must be a subset of the
+        //  accumulation selection; unlike it, this may change across a
+        //  restart -- it gates user-facing serialisation only. Every
+        //  accumulated bin's ensemble state is checkpointed regardless
+        //  (the *State spellings), so restart continuity is independent
+        //  of the output selection.
         labelList outputBins_;
 
         //- Per-bin accumulation gate (true = this bin exists in memory);
@@ -117,6 +119,20 @@ class BBPA
 
         //- Per-bin output gate for the writer (true = may be written)
         boolList outputBinMap_;
+
+        //- The time-quadrature rule (part of the numerical contract and
+        //  the checkpoint signature). This build implements "endPoint":
+        //  the step's single sample is constant over its interval.
+        word timeQuadrature_;
+
+        //- fieldAvailability strict: every requested field must be
+        //  registered before the first retained accumulation interval
+        //  (publication runs); lazy (default) admits late-registering
+        //  derived fields, each keeping its own independent cycle counts.
+        bool fieldAvailabilityStrict_;
+
+        //- One-shot flag for the strict availability check
+        bool availabilityChecked_;
 
         //- Number of cycles to average (-1 for all)
         label cycles_;

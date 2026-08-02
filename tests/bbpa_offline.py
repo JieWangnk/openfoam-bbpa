@@ -239,27 +239,16 @@ class BBPAReplica:
         """
         out = {}
         for j in range(self.n_bins):
-            hasCross = self.binCounts[j] > 0
-            hasCurrent = self.binTime[j] > 0
-            if not (hasCross or hasCurrent):
+            # FINALISED-ONLY: nothing is published (or checkpointed) for a
+            # bin before its first complete cycle.
+            if self.binCounts[j] <= 0:
                 continue
-            # --- mean (phi_PA): pure finalised; partial only if no cross data ---
-            if hasCross:
-                PA = self.meanFields[j].copy()
-            else:
-                inv = 1.0 / self.binTime[j]
-                PA = self.binSum[j] * inv
-            # --- variance (phi_PAVariance): PURE finalised, only if count>1 ---
+            PA = self.meanFields[j].copy()
             if self.binCounts[j] > 1:
                 PAVar = self.M2[j] / (self.binCounts[j] - 1.0)
             else:
                 PAVar = None
-            # --- second moment (phi_PA_UU): same rule as the mean ---
-            if hasCross:
-                PAUU = self.meanSqr[j].copy()
-            else:
-                invT = 1.0 / self.binTime[j]
-                PAUU = self.binSqrSum[j] * invT
+            PAUU = self.meanSqr[j].copy()
             out[j] = {"PA": PA, "PA_UU": PAUU, "PAVariance": PAVar}
         return out
 

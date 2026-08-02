@@ -118,6 +118,18 @@ def run_rows():
             elif "formatVersion" not in log:
                 errors.append("format: aborted without naming formatVersion")
 
+    # -- tampered timeQuadrature: part of the numerical meaning ---------------
+    rundir, logpath = _seg1("meta_quad", _body())
+    props = glob.glob(os.path.join(rundir, "3", "uniform", "*Properties"))
+    s0 = open(props[0]).read()
+    open(props[0], "w").write(
+        s0.replace("timeQuadrature  endPoint;", "timeQuadrature  trapezoidal;"))
+    rc, log = _restart(rundir, logpath, _body())
+    if rc == 0:
+        errors.append("quad: restart ran; expected an abort")
+    elif "timeQuadrature" not in log:
+        errors.append("quad: aborted without naming timeQuadrature")
+
     # -- WARN row: product turned OFF runs, warns, survivors exact -----------
     bodyA = _body()
     bodyB = _body().replace(

@@ -20,7 +20,7 @@ startFrom       startTime;
 startTime       0;
 
 stopAt          endTime;
-endTime         2;
+endTime         3;
 
 deltaT          0.001;
 adjustTimeStep  no;              // fixed dt -> exact, reproducible binning
@@ -62,13 +62,15 @@ functions
         //   secondMoment       (default on)  accumulate + write <phi phi>
         //   crossCycleVariance (default on)  accumulate + write Welford
         //   writePerCycle      (default off) keep + write this cycle's _Bin
-        fields          ( U );
+        fields          ( U { writePerCycle on; } );   // U_Bin beside U_PA
 
         // -- the phase grid ----------------------------------------------
         period          1.0;         // cycle period [s]
-        nBins           10;          // binDeltaT = period/nBins = 0.1
+        nBins           1000;          // binDeltaT = period/nBins = 0.1
         phaseOrigin     0;           // phase 0 sits at t = 0
-        discardCycles   0;           // no startup cycles discarded here
+        discardCycles   1;           // cycle 0 is the from-rest startup:
+                                     // keeping it would contaminate the
+                                     // ensemble with the transient
         maxCycles       -1;          // unlimited
 
         // -- which bins, and where their windows sit ----------------------

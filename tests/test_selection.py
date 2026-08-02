@@ -7,22 +7,21 @@ are WRITTEN (outputSelection).
 Rows (same bin-constant prescribe trajectory as everywhere else):
 
   calcAllWriteSome   accumulation all + outputSelection list (2 5):
-                     files exist ONLY for bins 2 and 5, their values equal
-                     the closed form, and read() warns that unwritten bins
-                     are not restart-recoverable. (The combination the old
-                     single phaseSelection could not express.)
+                     PRODUCT files exist only for bins 2 and 5 and equal
+                     the closed form; every other accumulated bin's
+                     ensemble persists as checkpoint state (the *State
+                     spellings), independent of the output selection.
   grouped            the full three-block spelling -- phaseGrid{} +
                      accumulationSelection{} + outputSelection{} -- runs
                      with ZERO deprecation warnings and equals the closed
                      form.
   outputChangeOnRestart
                      restart with a WIDER outputSelection is allowed (it
-                     gates serialisation only): segment 1 writes bins
-                     (2 5); the restart writes everything accumulated. The
-                     previously-written bins keep their history exactly
-                     (== closed form over all 6 cycles); never-written bins
-                     cold-start with a warning, accumulating only
-                     post-restart cycles.
+                     gates serialisation only), and EVERY accumulated bin
+                     keeps its complete history -- the internal checkpoint
+                     is independent of outputSelection, so bins never
+                     published before the restart still equal the closed
+                     form over all 6 cycles afterwards.
 
 Runnable standalone (exit 1 on failure, for Alltest) and via pytest.
 """
@@ -68,7 +67,7 @@ GROUPED_BODY = """        fields          (U);
         }
         discardCycles   0;
         accumulationSelection { mode all; }
-        outputSelection       { mode accumulated; }
+        outputSelection       { mode allAccumulated; }
         output { layout phaseAligned; cycleWriteInterval 1; }
         executeControl  timeStep;
         executeInterval 1;
@@ -86,9 +85,13 @@ def _run(name, body, end_time=END_TIME):
 
 
 def _upa_at(rundir, cs, j):
+    return _file_at(rundir, cs, j, "U_PA")
+
+
+def _file_at(rundir, cs, j, fname):
     for tv, full in rv._time_dirs(rundir).items():
         if abs(tv - (cs + j * rv.BIN_DT)) < 1e-7:
-            return os.path.isfile(os.path.join(full, "U_PA"))
+            return os.path.isfile(os.path.join(full, fname))
     return False
 
 
@@ -99,21 +102,26 @@ def run_rows():
     # -- calculate all 8, write only (2 5) ------------------------------------
     sel = ("        outputSelection { mode list; bins (2 5); }\n")
     rd, _ = _run("sel_calcAllWriteSome", _body(sel))
-    log = open(os.path.join(rd, "log.foamRun")).read()
-    if "not restart-recoverable" not in log and "cold-start" not in log:
-        errors.append("calcAllWriteSome: missing the sparse-output restart "
-                      "warning at read()")
     got = rv.read_bbpa_output(rd, FINAL_CS)
     for j in range(rv.I):
         present = _upa_at(rd, FINAL_CS, j)
+        state = _file_at(rd, FINAL_CS, j, "U_PAmeanState")
         if j in (2, 5):
             if not present:
                 errors.append(f"calcAllWriteSome: bin {j} missing")
             elif _err(got[j]["PA"], closed[j]["PA"]) >= TOL:
                 errors.append(f"calcAllWriteSome: bin {j} PA err "
                               f"{_err(got[j]['PA'], closed[j]['PA']):.3e}")
-        elif present:
-            errors.append(f"calcAllWriteSome: unselected bin {j} written")
+            if state:
+                errors.append(f"calcAllWriteSome: bin {j} has BOTH product "
+                              "and state spellings")
+        else:
+            if present:
+                errors.append(f"calcAllWriteSome: unselected bin {j} "
+                              "published as a product")
+            if not state:
+                errors.append(f"calcAllWriteSome: bin {j} missing its "
+                              "checkpoint state (U_PAmeanState)")
 
     # -- the grouped three-block spelling -------------------------------------
     rd, _ = _run("sel_grouped", GROUPED_BODY)
@@ -144,25 +152,18 @@ def run_rows():
         errors.append("outputChangeOnRestart: restart aborted -- widening "
                       "outputSelection must be allowed")
     else:
-        if "cold start" not in log2 and "cold-start" not in log2:
-            errors.append("outputChangeOnRestart: never-written bins should "
-                          "warn about cold-starting")
+        if "reset to a clean cold start" in log2:
+            errors.append("outputChangeOnRestart: a bin lost its state -- "
+                          "the checkpoint must be independent of "
+                          "outputSelection")
         got = rv.read_bbpa_output(c2, FINAL_CS)
-        # previously-written bins keep their full history
-        for j in (2, 5):
+        # EVERY accumulated bin keeps its complete history
+        for j in range(rv.I):
             if j not in got:
                 errors.append(f"outputChangeOnRestart: bin {j} missing")
             elif _err(got[j]["PA"], closed[j]["PA"]) >= TOL:
                 errors.append(f"outputChangeOnRestart: bin {j} lost history "
                               f"({_err(got[j]['PA'], closed[j]['PA']):.3e})")
-        # a never-written bin cold-started: cycles 3..5 only
-        closed35 = bo.closed_form_bin_constant(
-            rv.A, lambda n: rv.c_of_n(n + 3), 3)
-        j = 0
-        if j in got and _err(got[j]["PA"], closed35[j]["PA"]) >= TOL:
-            errors.append(f"outputChangeOnRestart: cold-started bin {j} "
-                          f"should hold the post-restart ensemble "
-                          f"({_err(got[j]['PA'], closed35[j]['PA']):.3e})")
     return errors
 
 
@@ -178,8 +179,8 @@ if __name__ == "__main__":
         for e in errors:
             print("  ", e)
         sys.exit(1)
-    print("selection rows: PASS -- calculate-all/write-some manifest exact,")
-    print("  grouped phaseGrid/accumulationSelection/outputSelection spelling")
-    print("  clean, and widening outputSelection across a restart preserves")
-    print("  written history while never-written bins cold-start (warned)")
+    print("selection rows: PASS -- products only for selected bins, every")
+    print("  accumulated bin checkpointed as *State regardless, the grouped")
+    print("  three-block spelling clean, and a restart with a widened")
+    print("  outputSelection keeps every bin's complete history")
     sys.exit(0)

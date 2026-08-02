@@ -153,10 +153,13 @@ ROWS = [
     ("unknown_outputSelection_mode",
      BASE + "        outputSelection { mode some; }\n",
      "unknown outputSelection mode", 1.0),
-    ("output_all_sparse_accumulation",
-     BASE + "        accumulationSelection { mode list; bins (2 5); }\n"
-            "        outputSelection { mode all; }\n",
-     "only accumulated bins", 1.0),
+    ("renamed_output_mode",
+     BASE + "        outputSelection { mode accumulated; }\n",
+     "renamed 'allAccumulated'", 1.0),
+    ("unknown_timeQuadrature",
+     "        fields (U);\n"
+     "        phaseGrid { period 1.0; nBins 8; timeQuadrature trapezoidal; }\n",
+     "unknown timeQuadrature", 1.0),
     ("phaseGrid_and_flat",
      "        fields (U);\n"
      "        phaseGrid { period 1.0; nBins 8; }\n"

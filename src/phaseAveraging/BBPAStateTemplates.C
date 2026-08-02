@@ -90,10 +90,22 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
         // fold a zero <UiUj> in at full weight.
         const bool withSqr = bi.integ_.binSqrSum_.set(binI);
 
-        const fileName binPath =
-            mesh.time().path()/binTimeName/(bi.fieldName_ + "_Bin");
-        const fileName uuPath =
-            mesh.time().path()/binTimeName/(bi.fieldName_ + "_Bin_UU");
+        // outputSelection may have changed since the flush: closed bins
+        // persist under _Bin (published) or _BinState (state-only) -- try
+        // the product name first, then the state spelling.
+        word binName = bi.fieldName_ + "_Bin";
+        if (!Foam::isFile(mesh.time().path()/binTimeName/binName))
+        {
+            binName = bi.fieldName_ + "_BinState";
+        }
+        word uuName = bi.fieldName_ + "_Bin_UU";
+        if (!Foam::isFile(mesh.time().path()/binTimeName/uuName))
+        {
+            uuName = bi.fieldName_ + "_Bin_UUState";
+        }
+
+        const fileName binPath = mesh.time().path()/binTimeName/binName;
+        const fileName uuPath = mesh.time().path()/binTimeName/uuName;
 
         if (!Foam::isFile(binPath)) continue;
         if (withSqr && !Foam::isFile(uuPath)) continue;
@@ -102,7 +114,7 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
         (
             IOobject
             (
-                bi.fieldName_ + "_Bin",
+                binName,
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -122,7 +134,7 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
             (
                 IOobject
                 (
-                    bi.fieldName_ + "_Bin_UU",
+                    uuName,
                     binTimeName,
                     mesh,
                     IOobject::MUST_READ,
@@ -191,20 +203,29 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
         const scalar binTime = cycleStartTime + binI * binDeltaT;
         const word binTimeName = Time::timeName(binTime);
 
-        // 1. mean: restore stats_.mean_[binI] from the file the writer
-        //    actually emitted -- _PA when writePhaseMean is on, the
-        //    checkpoint-only meanState file when it is off but the variance
-        //    still needs the mean chain. With neither, skip: no file was
-        //    ever written, and treating that as "checkpoint lost" would
-        //    wrongly reset the counts the OTHER products rely on.
-        const bool meanFromState =
-            !bi.products_.writeMean && bi.stats_.M2_.set(binI);
-        if (bi.products_.writeMean || meanFromState)
+        // 1. mean: the writer emits it for every finalised accumulated
+        //    bin -- as the _PA product when published, as the meanState
+        //    spelling otherwise. outputSelection may have changed since
+        //    the checkpoint, so try the product name first and fall back
+        //    to the state spelling.
         {
+            word meanName = fieldName + paSuffix;
+            if
+            (
+                !Foam::isFile(mesh.time().path()/binTimeName/meanName)
+             && Foam::isFile
+                (
+                    mesh.time().path()/binTimeName
+                   /(fieldName + paSuffix + "meanState")
+                )
+            )
+            {
+                meanName = fieldName + paSuffix + "meanState";
+            }
+
             IOobject paIO
             (
-                fieldName + paSuffix
-              + (meanFromState ? word("meanState") : word::null),
+                meanName,
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -258,13 +279,22 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
             bi.stats_.mean_[binI] = loaded;
         }
 
-        // 2. M2: read fieldName_PAVariance and rescale by (n-1)
-        //    (only when the variance product is allocated).
+        // 2. M2: read the variance file and rescale by (n-1)
+        //    (only when the variance product is allocated; product name
+        //    first, then the state spelling).
         if (bi.stats_.M2_.set(binI) && nCyc > 1)
         {
+            word varName = fieldName + paSuffix + bbpaVarianceSuffix<Type>();
+            if (!Foam::isFile(mesh.time().path()/binTimeName/varName))
+            {
+                varName =
+                    fieldName + paSuffix + bbpaVarianceSuffix<Type>()
+                  + "State";
+            }
+
             IOobject varIO
             (
-                fieldName + paSuffix + bbpaVarianceSuffix<Type>(),
+                varName,
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,
@@ -281,13 +311,20 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
             }
         }
 
-        // 3. meanSqr: read fieldName_PA_UU into stats_.meanSqr_[binI]
-        //    (only when the second-moment product is allocated).
+        // 3. meanSqr: read the second-moment file into stats_.meanSqr_
+        //    (only when allocated; product name first, then the state
+        //    spelling).
         if (bi.stats_.meanSqr_.set(binI))
         {
+            word uuName = fieldName + paSuffix + "_UU";
+            if (!Foam::isFile(mesh.time().path()/binTimeName/uuName))
+            {
+                uuName = fieldName + paSuffix + "_UUState";
+            }
+
             IOobject uuIO
             (
-                fieldName + paSuffix + "_UU",
+                uuName,
                 binTimeName,
                 mesh,
                 IOobject::MUST_READ,

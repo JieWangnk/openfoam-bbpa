@@ -92,13 +92,33 @@ Deprecated spellings (`startCycle`, `cycles`, `binsOfInterest`,
 work for one release, each with a warning naming its replacement; giving
 old and new together aborts.
 
-## What to look at
+## Reading `U`, `U_Bin` and `U_PA` in one directory
 
-With this setup every write directory `0.1, 0.2, …, 2` carries `U` and
-`U_PA` side by side, `U_PA` is the running cross-cycle phase mean of the
-sinusoidal inlet response, and the run restarts exactly (kill it, restart
-from the last write, the numbers match the uninterrupted run — the strict
-restart metadata aborts if the configuration changed meanwhile).
+Take directory `1.5` (cycle 1's label for phase 0.5). Its three fields
+are three DIFFERENT quantities, and comparing them pointwise is exactly
+how to understand BBPA:
+
+* `U` — the instantaneous solution at t = 1.5 s: one realisation of one
+  cycle, at one instant.
+* `U_Bin` — cycle 1's own time-integrated mean over the (centred) window
+  around phase 0.5. Written once, when that window closed; never updated.
+* `U_PA` — the cross-cycle ensemble mean at phase 0.5 **as of that
+  cycle's dump**: at `1.5` it covers one retained cycle (so there
+  `U_PA == U_Bin` identically); at `2.5` two cycles, and so on — walking
+  the label grids forward shows the ensemble converging.
+
+Three consequences worth checking at a point:
+
+1. `U` should NOT equal `U_PA` at the same phase unless the flow is
+   perfectly periodic — their difference IS the cycle-to-cycle
+   variability that `U_PAVarianceMag` quantifies (with ≥ 2 cycles).
+2. Products are **finalised-only**: the discarded startup cycle
+   (`discardCycles 1`) and any not-yet-complete window produce no
+   `U_PA`/`U_Bin` files at all — a directory either holds a finished
+   statistic or nothing, never a partial under a product name.
+3. The run restarts exactly (kill it, restart from the last write, the
+   numbers match the uninterrupted run) — the strict restart metadata
+   aborts if the configuration changed meanwhile.
 
 The machine-precision ground truth for all of this lives in `../../tests/`
 (`./Alltest`): a prescribed analytic field, a bit-faithful offline replica,

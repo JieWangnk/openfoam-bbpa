@@ -97,7 +97,6 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
     forAll(bi.integ_.binSum_, binI)
     {
         if (!bi.integ_.binSum_.set(binI)) continue;   // sparse-bin mode
-        if (!writeBins[binI]) continue;               // outputSelection
         if (binI == skipBin) continue;                  // restart-straddled
         if (bi.binFlushed_[binI]) continue;                // already on disk
         if (bi.integ_.binTime_[binI] <= 0) continue;  // no data yet
@@ -119,7 +118,8 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
         (
             IOobject
             (
-                bi.fieldName_ + "_Bin",
+                bi.fieldName_ + "_Bin"
+              + (writeBins[binI] ? word::null : word("State")),
                 binTimeName,
                 mesh,
                 IOobject::NO_READ,
@@ -142,7 +142,8 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
             (
                 IOobject
                 (
-                    bi.fieldName_ + "_Bin_UU",
+                    bi.fieldName_ + "_Bin_UU"
+                  + (writeBins[binI] ? word::null : word("State")),
                     binTimeName,
                     mesh,
                     IOobject::NO_READ,
@@ -194,10 +195,7 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
         // Skip bins not allocated in sparse-bin mode.
         if (!bi.stats_.mean_.set(binI)) continue;
 
-        // outputSelection: this bin is accumulated but not written. Its
-        // state is then also absent from the on-disk checkpoint -- such a
-        // bin cold-starts on restart (warned at read()).
-        if (!writeBins[binI]) continue;
+
 
         const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
         const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;
@@ -219,6 +217,7 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
             if
             (
                 emitBin
+             && writeBins[binI]
              && bi.lastCycleFields_.size()
              && bi.lastCycleFields_.set(binI)
              && bi.lastCycleBinTime_[binI] > 0
@@ -247,71 +246,46 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
                 continue;
             }
 
-            // Build the PA field values without triggering tmp<> expressions
-            // on registered fields. We compute in a copy.
-            // writePhaseMean off suppresses only the _PA FILE; the mean
-            // chain always accumulates. When the variance is on, the mean
-            // must still be PERSISTED (the restart folds Welford deltas
-            // against it), so it goes to the checkpoint-only
-            // <field><suffix>meanState file instead of _PA.
-            const bool writeMeanState =
-                !bi.products_.writeMean && bi.stats_.M2_.set(binI);
-            if (bi.products_.writeMean || writeMeanState)
+            // Products are FINALISED-ONLY: nothing is published (or
+            // checkpointed) for a bin before its first complete cycle.
+            // A partial integral written under a product name would be
+            // indistinguishable on disk from a converged value.
+            if (!hasCrossData)
             {
-            FieldType paField
-            (
-                IOobject
-                (
-                    bi.fieldName_ + paSuffix
-                  + (writeMeanState ? word("meanState") : word::null),
-                    binTimeName,
-                    mesh,
-                    IOobject::NO_READ,
-                    IOobject::NO_WRITE,
-                    false
-                ),
-                bi.stats_.mean_[binI]
-            );
-
-            // paField was constructed FROM bi.stats_.mean_[binI], i.e. the mean over
-            // the bi.stats_.binCounts_[binI] COMPLETE cycles folded so far. That is what
-            // <name>_PA must contain.
-            //
-            // It must NOT be blended with the in-progress cycle. The old code did
-            //     (bi.stats_.mean_*nOld + bi.integ_.binSum_/bi.integ_.binTime_)
-            //         / (nOld + 1)
-            // which is wrong twice over:
-            //  (1) the in-progress bin is PARTIAL -- with writeMode perCycle the
-            //      write fires on the cycle transition, when the new cycle has
-            //      accumulated exactly ONE timestep into bin 0 -- yet it is
-            //      weighted as a whole cycle. Measured on tutorials/bbpaVerify:
-            //      bin 0 came out 0.632 against a true 0.701, i.e. (mean*2 + U_inst)/3,
-            //      while every other bin (just reset, so no current data) was exact.
-            //  (2) these files ARE the restart checkpoint: restoreBinItemFromDisk()
-            //      reads bi.stats_.mean_ back out of <name>_PA. A blended value is
-            //      therefore restored AS the folded mean and compounds at every
-            //      restart.
-            //
-            // Only when no complete cycle exists yet is there nothing to report but
-            // the running partial. bi.stats_.binCounts_[binI] is 0 in that case, and the
-            // restore skips bins with count 0, so it can never be read back as a mean.
-            //
-            // Assign the WHOLE field, not primitiveFieldRef(): an internal-only
-            // assignment leaves the boundary at whatever the accumulator was
-            // constructed with (zero), silently dropping the boundary values
-            // of the partial bin. See the _PA_UU note below.
-            if (!hasCrossData && hasCurrentData)
-            {
-                const scalar inv = 1.0 / bi.integ_.binTime_[binI];
-                paField = bi.integ_.binSum_[binI] * inv;
+                continue;
             }
 
-            writePAField(paField, mesh, binTimeName);
+            // Product files obey outputSelection and the per-field output
+            // flags. The ensemble STATE of every accumulated bin is
+            // checkpointed regardless, under the *State spellings, so
+            // outputSelection is serialisation-only: it may change across
+            // a restart without touching restart continuity.
+            const bool meanAsProduct =
+                writeBins[binI] && bi.products_.writeMean;
+
+            {
+                FieldType paField
+                (
+                    IOobject
+                    (
+                        bi.fieldName_ + paSuffix
+                      + (meanAsProduct ? word::null : word("meanState")),
+                        binTimeName,
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
+                    bi.stats_.mean_[binI]
+                );
+
+                writePAField(paField, mesh, binTimeName);
             }
 
             binsWritten++;
 
-            // Welford cycle-variance (cycle-to-cycle variability of bin mean)
+            // Welford cycle-variance (cycle-to-cycle variability of the
+            // bin means; defined for two or more cycles)
             if (bi.stats_.M2_.set(binI) && bi.stats_.binCounts_[binI] > 1)
             {
                 volScalarField paVariance
@@ -319,7 +293,8 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
                     IOobject
                     (
                         bi.fieldName_ + paSuffix
-                      + bbpaVarianceSuffix<Type>(),
+                      + bbpaVarianceSuffix<Type>()
+                      + (writeBins[binI] ? word::null : word("State")),
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,
@@ -332,39 +307,18 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
                 writePAField(paVariance, mesh, binTimeName);
             }
 
-            // Second-moment output: <phi*phi>_bin as a phase-aligned field.
-            // For vector U this is the 6-component symmetric tensor
-            // <U_i U_j> from which the Reynolds stress R_ij =
-            // <U_i U_j> - <U_i><U_j> and TKE = 0.5*trace(R) are computed
-            // offline. For scalar p this reduces to <p*p>.
-            // Fires whenever we have data (finalised or in-progress bin)
-            // and the product is on (allocation is the gate).
-            if (bi.stats_.meanSqr_.set(binI) && (hasCrossData || hasCurrentData))
+            // Second moment <phi*phi> over the COMPLETE cycles: the raw
+            // tensor from which Reynolds stress and TKE are reconstructed
+            // offline. Whole-field construction so the boundary is
+            // written (wallShearStress carries ALL its data there).
+            if (bi.stats_.meanSqr_.set(binI))
             {
-                // Construct FROM bi.stats_.meanSqr_[binI], exactly as paField is
-                // constructed from bi.stats_.mean_[binI] above. This is not a
-                // stylistic change: the previous form built a Zero field and
-                // then assigned only primitiveFieldRef(), so the BOUNDARY of
-                // <name>_PA_UU was never written and every patch came out
-                // "value uniform (0 0 0 0 0 0)".
-                //
-                // The accumulation itself is fine -- operator+= on a
-                // GeometricField updates the boundary too -- so the correct
-                // boundary existed in memory and was simply dropped on write.
-                //
-                // For wallShearStress this made the field entirely useless
-                // rather than merely incomplete: WSS has a uniform (0 0 0)
-                // internalField, so ALL of its data is on the wall patch.
-                // wallShearStress_PA_UU was therefore zero everywhere, and any
-                // WSS fluctuation intensity or Reynolds stress derived from it
-                // would be silently zero rather than obviously broken.
-                // Verified by tutorials/bbpaVerifyLES, which compares boundary
-                // patches and not just the internalField.
                 SqrFieldType paUU
                 (
                     IOobject
                     (
-                        bi.fieldName_ + paSuffix + "_UU",
+                        bi.fieldName_ + paSuffix + "_UU"
+                      + (writeBins[binI] ? word::null : word("State")),
                         binTimeName,
                         mesh,
                         IOobject::NO_READ,
@@ -373,27 +327,6 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
                     ),
                     bi.stats_.meanSqr_[binI]
                 );
-
-                // The raw second moment over the COMPLETE cycles only -- as for
-                // _PA above, and for the same two reasons: blending the
-                // in-progress cycle weights a partial bin (one timestep, on a
-                // perCycle write) as a whole cycle, and this file is the
-                // checkpoint that restoreBinItemFromDisk() reads bi.stats_.meanSqr_
-                // back out of, so a blended value would be restored AS the
-                // second moment and compound every restart.
-                //
-                // This matters more than _PA: R_ij^bin = <U_iU_j> - <U_i><U_j>
-                // and k_bin = 0.5*tr(R_ij^bin) are reconstructed FROM this
-                // field, so a contaminated bin propagates straight into the
-                // reported Reynolds stress and resolved energy.
-                //
-                // Only when no complete cycle exists yet is there nothing to
-                // report but the running partial.
-                if (!hasCrossData && hasCurrentData)
-                {
-                    const scalar invT = 1.0 / bi.integ_.binTime_[binI];
-                    paUU = bi.integ_.binSqrSum_[binI] * invT;
-                }
 
                 writePAField(paUU, mesh, binTimeName);
             }
@@ -435,9 +368,10 @@ void Foam::functionObjects::BBPA::writer::companion
     if (!bi.products_.writeMean) return;
     if (!writeBins[currentBinIndex]) return;    // outputSelection
 
+    // Finalised-only: the companion file is a product and is never
+    // built from a partial window.
     const bool hasCrossData = bi.stats_.binCounts_[binI] > 0;
-    const bool hasCurrentData = bi.integ_.binTime_[binI] > 0;
-    if (!hasCrossData && !hasCurrentData) return;
+    if (!hasCrossData) return;
 
     const fvMesh& mesh = bi.stats_.mean_[binI].mesh();
     const word solverTimeName = time.timeName(time.value());

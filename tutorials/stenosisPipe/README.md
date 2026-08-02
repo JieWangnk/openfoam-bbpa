@@ -7,8 +7,8 @@ processor boundaries; this case is where a broken reduction or a
 processor-local write path would show.
 
 `binDeltaT = period/nBins = 0.02 = writeInterval`, so every phase-aligned
-directory IS a solver write directory: `U`, `U_PA` (and the companion
-copy) land side by side with no extra directories, serial or parallel.
+directory IS a solver write directory: `U` and `U_PA` land side by side
+with no extra directories, serial or parallel.
 The first (transient) cycle is discarded (`discardCycles 1`). The IPA
 function object runs alongside for a classical pointwise-estimator
 comparison.

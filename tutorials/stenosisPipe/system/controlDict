@@ -32,10 +32,9 @@ libs ("libPhaseAveraging.so");
 functions
 {
     // One job (see README.md): production-like PARALLEL operation --
-    // serial and decomposed runs must agree. layout both writes the
-    // current bin's U_PA beside the instantaneous fields at every write
-    // (binDeltaT == writeInterval, so the phase-aligned dirs ARE the
-    // solver's own) plus the per-cycle phase-aligned dump.
+    // serial and decomposed runs must agree. binDeltaT == writeInterval,
+    // so the phase-aligned dirs ARE the solver's own write dirs: U and
+    // U_PA land side by side with layout phaseAligned alone.
     BBPA
     {
         type            BBPA;
@@ -46,19 +45,20 @@ functions
 
         fields          (U);
         period          1.0;         // forcing period T
-        nBins           50;          // binDeltaT = 0.02 = writeInterval
+        nBins           100;          // binDeltaT = 0.02 = writeInterval
         discardCycles   1;           // discard the first (transient) cycle
 
         output
         {
-            layout              both;
+            layout              phaseAligned;
             cycleWriteInterval  1;
         }
     }
 
-    // Instantaneous Phase Averaging: classical pointwise estimator (one sample
-    // per cycle at each phase point), for a side-by-side comparison with BBPA.
-    // Its 50 phase fields (U_IPA_phase0..49) are written at the cycle ends.
+    // Instantaneous Phase Averaging: classical pointwise estimator (one
+    // sample per cycle at each phase point), running on the same
+    // trajectory for a side-by-side comparison with BBPA. Its 50 phase
+    // fields (U_IPA_phase0..49) are written at the cycle ends.
     IPA
     {
         type            IPA;

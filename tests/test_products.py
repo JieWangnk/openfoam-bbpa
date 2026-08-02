@@ -12,8 +12,10 @@ the ones that remain.
   meanOnly   U { secondMoment off; crossCycleVariance off; }
                 -> U_PA only; no U_PA_UU, no U_PAVariance anywhere
   sqrOnly    U { writePhaseMean off; crossCycleVariance off; }
-                -> U_PA_UU only; no U_PA and no U_PAmeanState anywhere
-                   (variance off too, so the mean chain need not persist)
+                -> U_PA_UU only among products; no U_PA anywhere. The mean
+                   chain still persists as the U_PAmeanState checkpoint
+                   (every finalised accumulated bin is restart-complete
+                   regardless of which products are published)
   varOnly    U { writePhaseMean off; secondMoment off; }
                 -> U_PAVariance == closed form with NO U_PA file; the mean
                    chain persists as the checkpoint-only U_PAmeanState
@@ -133,8 +135,10 @@ def run_rows():
     m = _manifest(rd)
     if not m["U_PA_UU"]:
         errors.append("sqrOnly: U_PA_UU missing")
-    if m["U_PA"] or m["U_PAVarianceMag"] or m["U_PAmeanState"]:
+    if m["U_PA"] or m["U_PAVarianceMag"]:
         errors.append(f"sqrOnly: off products written, manifest {m}")
+    if not m["U_PAmeanState"]:
+        errors.append("sqrOnly: U_PAmeanState checkpoint missing")
     _check_closed("sqrOnly", rv.read_bbpa_output(rd, FINAL_CS), closed,
                   ("PA_UU",), errors)
 

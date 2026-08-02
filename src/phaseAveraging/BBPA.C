@@ -430,6 +430,9 @@ Foam::functionObjects::BBPA::BBPA
     currentBin_(-1),
     previousBin_(-1),
     lastFullWriteCycle_(-1),
+    timeQuadrature_("endPoint"),
+    fieldAvailabilityStrict_(false),
+    availabilityChecked_(false),
     layout_("phaseAligned"),
     cycleWriteInterval_(0),
     writeFinal_(true),
@@ -543,11 +546,13 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             (
                 k != "period" && k != "nBins"
              && k != "phaseOrigin" && k != "binAlignment"
+             && k != "timeQuadrature"
             )
             {
                 FatalErrorInFunction
                     << "unknown phaseGrid entry '" << k << "'; valid: "
-                    << "period, nBins, phaseOrigin, binAlignment."
+                    << "period, nBins, phaseOrigin, binAlignment, "
+                    << "timeQuadrature."
                     << exit(FatalError);
             }
         }
@@ -556,6 +561,21 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 
     grid.lookup("period") >> period_;
     nBins_ = grid.lookupOrDefault("nBins", 100);
+
+    // The time-quadrature rule is part of the numerical contract: the
+    // step's single sample is treated as constant over its interval
+    // (first-order, "endPoint"). Explicit so a future trapezoidal
+    // implementation cannot silently change the meaning of a case; part
+    // of the checkpoint signature for the same reason.
+    timeQuadrature_ =
+        grid.lookupOrDefault<word>("timeQuadrature", word("endPoint"));
+    if (timeQuadrature_ != "endPoint")
+    {
+        FatalErrorInFunction
+            << "unknown timeQuadrature '" << timeQuadrature_
+            << "'; this build implements: endPoint."
+            << exit(FatalError);
+    }
 
     // v2 names, with one release of compatibility for the deprecated ones.
     // Each old name still works alone (with a warning); giving old and new
@@ -592,6 +612,25 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             << "BBPA entry 'startCycle' is deprecated; use 'discardCycles'."
             << endl;
         startCycle_ = dict.lookup<label>("startCycle");
+    }
+
+    fieldAvailabilityStrict_ = false;
+    {
+        const word fa
+        (
+            dict.lookupOrDefault<word>("fieldAvailability", word("lazy"))
+        );
+        if (fa == "strict")
+        {
+            fieldAvailabilityStrict_ = true;
+        }
+        else if (fa != "lazy")
+        {
+            FatalErrorInFunction
+                << "unknown fieldAvailability '" << fa
+                << "'; valid values: lazy, strict."
+                << exit(FatalError);
+        }
     }
 
     if (fieldNames_.empty())
@@ -1126,7 +1165,20 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             }
         }
 
-        const word mode(os.lookupOrDefault<word>("mode", word("accumulated")));
+        const word mode
+        (
+            os.lookupOrDefault<word>("mode", word("allAccumulated"))
+        );
+
+        if (mode == "accumulated" || mode == "all")
+        {
+            FatalErrorInFunction
+                << "outputSelection mode '" << mode << "' was renamed "
+                << "'allAccumulated' before release (an 'all' distinct "
+                << "from the accumulated set would violate the subset "
+                << "rule)."
+                << exit(FatalError);
+        }
 
         if (mode == "list")
         {
@@ -1155,22 +1207,11 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 }
             }
         }
-        else if (mode == "all")
-        {
-            if (!binsOfInterest_.empty())
-            {
-                FatalErrorInFunction
-                    << "outputSelection mode 'all' requires "
-                    << "accumulationSelection mode 'all' -- only "
-                    << "accumulated bins can be written."
-                    << exit(FatalError);
-            }
-        }
-        else if (mode != "accumulated")
+        else if (mode != "allAccumulated")
         {
             FatalErrorInFunction
                 << "unknown outputSelection mode '" << mode
-                << "'; valid values: accumulated, all, list."
+                << "'; valid values: allAccumulated, list."
                 << exit(FatalError);
         }
     }
@@ -1222,7 +1263,20 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             }
         }
 
-        const word mode(os.lookupOrDefault<word>("mode", word("accumulated")));
+        const word mode
+        (
+            os.lookupOrDefault<word>("mode", word("allAccumulated"))
+        );
+
+        if (mode == "accumulated" || mode == "all")
+        {
+            FatalErrorInFunction
+                << "outputSelection mode '" << mode << "' was renamed "
+                << "'allAccumulated' before release (an 'all' distinct "
+                << "from the accumulated set would violate the subset "
+                << "rule)."
+                << exit(FatalError);
+        }
 
         if (mode == "list")
         {
@@ -1257,22 +1311,11 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
                 }
             }
         }
-        else if (mode == "all")
-        {
-            if (!binsOfInterest_.empty())
-            {
-                FatalErrorInFunction
-                    << "outputSelection mode 'all' requires "
-                    << "accumulationSelection mode 'all' -- bins that are "
-                    << "not accumulated cannot be written."
-                    << exit(FatalError);
-            }
-        }
-        else if (mode != "accumulated")
+        else if (mode != "allAccumulated")
         {
             FatalErrorInFunction
                 << "unknown outputSelection mode '" << mode
-                << "'; valid values: accumulated, all, list."
+                << "'; valid values: allAccumulated, list."
                 << exit(FatalError);
         }
     }
@@ -1296,10 +1339,6 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
             outputBinMap_[outputBins_[k]] = true;
         }
 
-        WarningInFunction
-            << "outputSelection is narrower than the accumulation: bins "
-            << "that are accumulated but never written have no on-disk "
-            << "state and will cold-start on a restart." << endl;
     }
 
     phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
@@ -1350,6 +1389,37 @@ bool Foam::functionObjects::BBPA::execute()
     {
         straddleChecked_ = true;
         flagStraddledBin();
+    }
+
+    // fieldAvailability strict: every requested field must exist before
+    // the first retained accumulation interval. Lazy (the default) lets a
+    // derived field appear later; its OWN per-bin cycle counts then cover
+    // only the cycles it observed (each field's ensemble is independent).
+    if
+    (
+        fieldAvailabilityStrict_
+     && !availabilityChecked_
+     && currentCycleNumber() >= startCycle_
+    )
+    {
+        availabilityChecked_ = true;
+        forAll(fieldNames_, i)
+        {
+            if
+            (
+                !scalarBinItems_.found(fieldNames_[i])
+             && !vectorBinItems_.found(fieldNames_[i])
+            )
+            {
+                FatalErrorInFunction
+                    << "fieldAvailability strict: field '" << fieldNames_[i]
+                    << "' is not registered at the first retained "
+                    << "accumulation interval. Ensure its producing "
+                    << "function object runs before BBPA, or use "
+                    << "fieldAvailability lazy."
+                    << exit(FatalError);
+            }
+        }
     }
 
     // The v2 numerical contract: split the solver step at every bin (and
@@ -1589,6 +1659,7 @@ bool Foam::functionObjects::BBPA::write()
             "binAlignment", word(binCentred_ ? "centred" : "left")
         );
         propsDict.add("selectedBins", binsOfInterest_);
+        propsDict.add("timeQuadrature", timeQuadrature_);
 
         propsDict.add("startTime", startTime_);
         propsDict.add("currentCycle", currentCycle_);
@@ -1744,6 +1815,20 @@ void Foam::functionObjects::BBPA::validateCheckpoint
             << binsOfInterest_ << " (empty = all). The restored state has "
             << "no data for newly selected bins. Keep the selection, or "
             << "cold-start."
+            << exit(FatalError);
+    }
+
+    const word ckQuad
+    (
+        propsDict.lookupOrDefault<word>("timeQuadrature", word("endPoint"))
+    );
+    if (ckQuad != timeQuadrature_)
+    {
+        FatalErrorInFunction
+            << "'timeQuadrature' changed across the restart: checkpoint "
+            << "has " << ckQuad << ", dictionary has " << timeQuadrature_
+            << ". The quadrature rule is part of the numerical meaning of "
+            << "the accumulated state."
             << exit(FatalError);
     }
 

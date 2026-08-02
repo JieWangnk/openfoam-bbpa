@@ -1,9 +1,10 @@
 # openfoam-bbpa
 
-**Bin-Based Phase Averaging for OpenFOAM** — an in-situ function object that
-produces phase-averaged mean, cross-cycle variance, and resolved turbulent
-kinetic energy directly in memory, without writing terabytes of transient
-snapshots.
+**Bin-Based Phase Averaging for OpenFOAM** — an in-situ function object
+that accumulates phase-conditioned means, raw second moments and
+cross-cycle variability directly in memory, allowing Reynolds stress and
+resolved turbulent kinetic energy to be reconstructed without writing
+transient snapshots.
 
 This branch (`of14-port`) is **BBPA v2 on OpenFOAM Foundation v14**; `main`
 carries the v1 implementation on Foundation v12. The v2 dictionary interface
@@ -32,7 +33,7 @@ q_BinPA[j,N] = (1/N) · Σ_{c=1..N} q_Bin[c,j]
 
 | Product | File | Meaning (unambiguous) |
 |---|---|---|
-| per-cycle bin mean | `<q>_Bin` | a single cycle's own time-integrated bin mean, written per bin as soon as that bin's **window closes** (a closed-bin current-cycle product; on restart, closed bins of the incomplete cycle are recovered from these files). At the cycle boundary the full set is the completed cycle's record. **Never** blended into the cross-cycle mean |
+| per-cycle bin mean | `<q>_Bin` | a single cycle's own time-integrated bin mean, written per bin as soon as that bin's **window closes** (a closed-bin current-cycle product; on restart, closed bins of the incomplete cycle are recovered). At the cycle boundary the full set is the completed cycle's record. **`_Bin` always denotes a finalised window — partial windows are never written under a product name.** Never blended into the cross-cycle mean |
 | per-cycle second moment | `<q>_Bin_UU` | the same cycle's bin mean of *q⊗q* |
 | cross-cycle mean | `<q>_PA` | equal-weight mean of the completed cycles' `_Bin` values |
 | cross-cycle second moment | `<q>_PA_UU` | equal-weight mean of the per-cycle second moments; Reynolds stress `R = ⟨q⊗q⟩ − ⟨q⟩⊗⟨q⟩` and TKE `½·tr(R)` follow offline |
@@ -56,6 +57,14 @@ reported in the same test). A floating-point snap (1e-9 in bin units) is
 used **only to classify** times lying numerically on a boundary; it never
 assigns a straddling step whole to one bin. The in-progress cycle is
 **never** blended into any cross-cycle product, in any output layout.
+
+**Centred windows.** With `binAlignment centred`, a bin belongs to the
+cycle containing its **label**; its integration window may overlap the
+neighbouring nominal cycles. `discardCycles` applies to the labelled
+cycle, and accumulation begins half a bin before the first retained cycle
+so that the first retained centred window is complete — every retained
+bin, including the boundary-straddling bin 0, carries the full weight
+each cycle (`tests/test_centred.py`).
 
 Two second-order statistics must not be confused. The **phase-conditioned
 resolved Reynolds stress** comes from the raw second moment,
@@ -143,7 +152,18 @@ functions
                                   //   WINDOW to [t_j - Δ/2, t_j + Δ/2)
                                   //   (labels stay on the grid); it is a
                                   //   different partition, no relabel
+            timeQuadrature  endPoint;  // the only rule this build
+                                  //   implements; explicit (and in the
+                                  //   restart signature) so a future
+                                  //   trapezoidal option can never
+                                  //   silently change a case's meaning
         }
+        fieldAvailability lazy;   // | strict: every field must exist
+                                  //   before the first retained interval
+                                  //   (publication runs); lazy admits
+                                  //   late-registering derived fields,
+                                  //   each with its own independent
+                                  //   per-bin cycle counts
         discardCycles   2;        // skip startup cycles
         maxCycles       -1;       // stop after N complete cycles (-1 = all)
 
@@ -154,13 +174,15 @@ functions
             mode        all;      // | list; bins (…) | solverWriteTimes
         }
 
-        // which ACCUMULATED bins are WRITTEN (serialisation only; may
-        // change across a restart; must be a subset of the accumulation.
-        // NB: a bin accumulated but never written has no on-disk state
-        // and cold-starts on restart)
+        // which ACCUMULATED bins are published as PRODUCTS (user-facing
+        // serialisation only; may change across a restart; must be a
+        // subset of the accumulation). All state required to reproduce
+        // an uninterrupted calculation is checkpointed independently for
+        // every accumulated bin (the *State spellings), so this never
+        // affects restart continuity.
         outputSelection
         {
-            mode        accumulated;   // | all | list; bins (…)
+            mode        allAccumulated;   // | list; bins (…)
         }
 
         // WHERE and WHEN (never changes the numbers)
@@ -168,10 +190,11 @@ functions
         {
             layout                  phaseAligned;  // | companion | both
             cycleWriteInterval      1;   // 0 = every write; N = every N cycles
-                                         // (0 re-writes every bin's files each
-                                         //  time: finalised values idempotently,
-                                         //  not-yet-finalised bins with their
-                                         //  evolving running partial)
+                                         // (0 re-writes FINALISED values
+                                         //  idempotently; a bin before its
+                                         //  first complete cycle produces
+                                         //  nothing -- products are
+                                         //  finalised-only)
             meanWriteIntervalCycles 1;   // <= 0 = final write only
             writeFinal              true;
             writeProperties         true;  // off = no restart checkpoint
@@ -197,11 +220,14 @@ counters, weights). On restart, any change that alters accumulator shape or
 meaning **aborts naming the entry**: period, `nBins`, `binAlignment`, the
 phase selection, an explicit `phaseOrigin` that contradicts the checkpoint,
 a removed field or changed type, a product turned on without history.
-Turning a product off warns and discards, and `outputSelection` may
-change freely (it gates serialisation, never a statistic) — though a bin
-that was accumulated and never written has no on-disk state and
-cold-starts. `tests/test_restart.py` proves continuous == restarted
-exactly.
+Turning a product off warns and discards. All state required to
+reproduce an uninterrupted calculation is checkpointed independently for
+every accumulated bin (as `*meanState`/`*_UUState`/`*VarianceMagState`/
+`*_BinState` files where the corresponding product is not published);
+changing `outputSelection` therefore affects only user-facing output and
+does not alter restart continuity. `tests/test_restart.py` proves
+continuous == restarted exactly, and `tests/test_selection.py` proves it
+across an outputSelection change.
 
 ### Migration from the v1 dictionary
 
