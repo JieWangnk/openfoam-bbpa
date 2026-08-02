@@ -11,7 +11,7 @@ all non-trivial — for `U` and for the derived `wallShearStress`, both
 with the per-cycle `_Bin` capture on (restart-safe at write granularity).
 
 `writeControl adjustableRunTime` keeps the solver's writes exactly on the
-0.02 grid, and `phaseSelection { mode solverWriteTimes; }` derives the 25
+0.02 grid, and `accumulationSelection { mode solverWriteTimes; }` derives the 25
 tracked bins from it (stride 4 of 100), each landing in a write folder,
 centred on its label.
 
