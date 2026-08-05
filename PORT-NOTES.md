@@ -36,6 +36,18 @@ typedef sites** (`BBPA.H` ×2, `IPA.H` ×1) using OF14's own alias `VolField<Typ
 This is the same OF14 field-template reorganisation as the earlier custom-BC port's
 `DimensionedField<Type, volMesh>` → `<…, fvMesh>`.
 
+**Cross-version portability confirmed (2026-08-04) — one tree builds under both OF12 and OF14, unmodified.**
+`VolField<Type>` is a common Foundation alias, defined in `volFieldsFwd.H` of both versions: OF12
+`using VolField = GeometricField<Type, fvPatchField, volMesh>`, OF14 `using VolField = GeometricField<Type,
+fvMesh, Field>`. They differ only internally, so the fixed source is version-agnostic. Verified empirically:
+the pristine `src/phaseAveraging/` compiled under OF12 (`wmake libso`, warnings only) to a library
+**byte-for-byte identical** (md5) to an explicitly-reverted variant, and it clears the full `tests/Alltest`
+(14/14) with a direct OF12-vs-OF14 field diff of `test_fixedDt` at **0.000e+00** (`_PA` / `_PA_UU` /
+`_PAVariance`, all bins), both matching the closed form at 2.2e-16. Do **not** replace `VolField<Type>` with
+an explicit `GeometricField<…>` spelling — that pins the file to one version and breaks the other. The v2
+source carries these aliases at 7 sites (`binAccumulators.H` ×4, `BBPA.H` ×2, `IPA.H` ×1) after the
+accumulator split; all are the portable form.
+
 ## Build (run under OpenFOAM 14)
 
 ```bash
