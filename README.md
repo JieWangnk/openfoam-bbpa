@@ -5,6 +5,14 @@ produces phase-averaged mean, cross-cycle variance, and resolved turbulent
 kinetic energy directly in memory, without writing terabytes of transient
 snapshots.
 
+## Versions
+
+This branch (`main`) carries **BBPA v1 on OpenFOAM Foundation v12**, as
+documented below. The [`of14-port`](../../tree/of14-port) branch carries
+**BBPA v2 on Foundation v14**: a reworked dictionary (per-field products,
+phase grid, accumulation/output selection) plus a guided study of every
+entry with runnable demos — start at `docs/study/README.md` on that branch.
+
 For the theory, error analysis, and cardiovascular LES validation see the
 companion paper:
 
