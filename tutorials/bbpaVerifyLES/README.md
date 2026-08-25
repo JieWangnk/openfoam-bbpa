@@ -4,7 +4,7 @@
 LES field.** `adjustTimeStep yes` (maxCo 0.6): steps grow and shrink with
 the pulsatile Courant number and routinely straddle bin edges — the
 situation the whole-step assignment rule and the boundary snap exist to
-make deterministic. 11 520 cells, forcing period 0.5 s, ~5 cycles, an
+make deterministic. 34 560 cells, forcing period 0.5 s, ~5 cycles, an
 inlet record whose ~0.07 rms perturbation differs every cycle, so the
 phase mean, the second moment `<U U>` and the cross-cycle variance are
 all non-trivial — for `U` and for the derived `wallShearStress`, both

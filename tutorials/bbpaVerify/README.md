@@ -51,7 +51,7 @@ accumulationSelection { mode all; }                // every bin (default)
 accumulationSelection { mode list; bins (2 5); }   // a sparse subset
 accumulationSelection { mode solverWriteTimes; }   // derived from the solver
 
-outputSelection { mode accumulated; }              // write all accumulated
+outputSelection { mode allAccumulated; }           // write all accumulated
 outputSelection { mode list; bins (2 5); }         // write a subset of them
 ```
 
