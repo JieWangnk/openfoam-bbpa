@@ -45,7 +45,7 @@ functions
 
         fields          (U);
         period          1.0;         // forcing period T
-        nBins           100;          // binDeltaT = 0.02 = writeInterval
+        nBins           50;          // binDeltaT = 0.02 = writeInterval
         discardCycles   1;           // discard the first (transient) cycle
 
         output
