@@ -45,6 +45,16 @@ names the middle of what was averaged. `tutorials/bbpaVerify` uses
 `centred` and its README explains the consequences for reading the
 output.
 
+![Left and centred windows on the same phase grid](figures/phase-grid.png)
+
+Both rows share the same labels (the orange diamonds — these are the
+output time directories); the alignment only moves the window each
+label describes. A centred bin 0 straddles the cycle boundary and
+belongs to the cycle containing its label — which also means the very
+first bin 0 of a run has only half a window before the start, so it is
+skipped rather than written partial. Redraw the schematic with
+`python3 plot_phase_grid.py` (no OpenFOAM needed).
+
 ## `timeQuadrature` (default `endPoint`, the only value)
 
 The rule for turning one field sample per step into an integral: the
