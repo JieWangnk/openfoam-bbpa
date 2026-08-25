@@ -10,6 +10,13 @@ This branch (`of14-port`) is **BBPA v2 on OpenFOAM Foundation v14**; `main`
 carries the v1 implementation on Foundation v12. The v2 dictionary interface
 below freezes at tag `of14-v2.0` (cut on the commit that carries it).
 
+> **Start here.** New to BBPA? The study in
+> [`docs/study/`](docs/study/README.md) teaches every dictionary entry in
+> plain language, one chapter per entry, each backed by a runnable demo
+> whose on-disk result is embedded in the chapter. If you only want to
+> understand the output files, read
+> [chapter 02 — what gets written](docs/study/02-what-gets-written.md).
+
 For the theory, error analysis, and cardiovascular LES validation see the
 companion paper:
 
