@@ -60,7 +60,19 @@ nothing here gets dirty.
 
 `./run_demos.py --check-docs` needs no OpenFOAM: it verifies that the
 manifest printed in each chapter matches its file in `expected/` byte
-for byte, and that demos and chapters map one to one.
+for byte, that demos and chapters map one to one, and that every image
+link in the chapters points to a committed file.
+
+## The figures
+
+Three chapters carry a figure, each drawn by a committed script and
+stored under `figures/`:
+
+| Figure | Chapter | Script | Needs |
+|---|---|---|---|
+| `u-bin-pa.png` | 02 | `plot_first_run.py` | the chapter-01 tutorial run |
+| `phase-grid.png` | 06 | `plot_phase_grid.py` | matplotlib only |
+| `pa-convergence.png` | 07 | `plot_convergence.py` | OpenFOAM (runs two ten-cycle cases, ~1 min, reused from `tests/_runs/`) |
 
 ## How to read a manifest
 

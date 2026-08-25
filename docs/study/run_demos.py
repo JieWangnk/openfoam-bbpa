@@ -24,8 +24,9 @@ Usage:
                                 (exit 1 on any difference)
   ./run_demos.py --check-docs   no OpenFOAM needed: verify that every
                                 chapter's embedded manifest matches
-                                docs/study/expected/ byte for byte and that
-                                demos and chapters map one to one
+                                docs/study/expected/ byte for byte, that
+                                demos and chapters map one to one, and
+                                that every image link points to a file
 
 Run modes need OpenFOAM sourced and libPhaseAveraging built
 (source /opt/openfoam14/etc/bashrc; wmake libso in src/phaseAveraging).
@@ -341,14 +342,22 @@ def mode_check(demos, full):
 
 
 DOC_RE = re.compile(r"<!-- demo:(\S+) -->\n```text\n(.*?)```", re.DOTALL)
+IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 
 def mode_check_docs():
     bad = []
     seen = {}
+    nimg = 0
     for path in sorted(glob.glob(os.path.join(HERE, "*.md"))):
         chapter = os.path.basename(path)
-        for m in DOC_RE.finditer(open(path).read()):
+        txt = open(path).read()
+        for m in IMG_RE.finditer(txt):
+            nimg += 1
+            if not os.path.isfile(os.path.join(HERE, m.group(1))):
+                bad.append(f"{chapter}: image link {m.group(1)} points "
+                           "to no committed file")
+        for m in DOC_RE.finditer(txt):
             name, text = m.group(1), m.group(2)
             if name in seen:
                 bad.append(f"{chapter}: demo {name} embedded more than once "
@@ -375,7 +384,8 @@ def mode_check_docs():
         print(f"\nDOCS CHECK FAILED ({len(bad)} problem(s))")
         return 1
     print(f"DOCS CHECK PASSED ({len(seen)} embedded manifest(s) match "
-          "expected/ byte for byte; demos and chapters map one to one)")
+          "expected/ byte for byte; demos and chapters map one to one; "
+          f"{nimg} image link(s) resolve)")
     return 0
 
 

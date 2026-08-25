@@ -19,6 +19,16 @@ Run:
 ./Allrun            # blockMesh, decomposePar, mpirun -np 4, reconstructPar
 ```
 
+![Phase animation: instantaneous, IPA and BBPA side by side](../../docs/stenosis_phase_animation.gif)
+
+The committed animation above shows a mid-plane slice of |U| over one
+cycle: the instantaneous field, the IPA pointwise estimate and the
+BBPA bin mean, side by side. Rebuild it from a finished run with:
+
+```bash
+python3 ../../scripts/make_phase_animation.py .   # needs pyvista + imageio
+```
+
 The serial-equals-parallel assertion at machine precision (and the
 restart-in-parallel path) lives in `../../tests/`. Dictionary reference:
 `../bbpaVerify/README.md`.
