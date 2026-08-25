@@ -2,177 +2,88 @@
   =========                 |
   \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
    \\    /   O peration     | Website:  https://openfoam.org
-    \\  /    A nd           | Copyright (C) 2024 OpenFOAM Foundation
+    \\  /    A nd           | Version:  14
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
-FoamFile
-{
-    format      ascii;
-    class       dictionary;
-    location    "system";
-    object      controlDict;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-// Example usage of BBPA (Bin-Based Phase Averaging) function object
-// Add this to your system/controlDict file in the functions{} section
+// BBPA (Bin-Based Phase Averaging) -- the v2 dictionary, annotated.
+// Add one of these blocks to the functions{} section of system/controlDict.
 //
-// SETUP IS IDENTICAL TO binBasedPhaseAverage - just change the type name!
-// The improvement is internal: proper time integration instead of sample averaging
+// The model:
+//   fields ( ... )   decides WHAT exists (per-field products);
+//   the phase grid   decides WHERE in phase each sample lands;
+//   *Selection { }   decide WHICH bins are held and which reach disk;
+//   output { }       decides WHERE and WHEN files are written -- nothing
+//                    in output{} can change a number.
 //
-// To upgrade from binBasedPhaseAverage:
-// 1. Change: type binBasedPhaseAverage; → type BBPA;
-// 2. Change: libs ("libfieldFunctionObjects.so"); → libs ("libPhaseAveraging.so");
-// 3. Keep all other parameters identical!
+// A guided tour of every entry, with runnable demos, is in docs/study/
+// (start at docs/study/README.md). The worked reference case is
+// tutorials/bbpaVerify.
 
 functions
 {
-    // BBPA - Bin-Based Phase Averaging with TRUE time integration
-    // Setup is identical to binBasedPhaseAverage, but with proper time integration within bins
-    BBPA1
+    // Minimal: every product for U, defaults everywhere else.
+    bbpaMinimal
     {
         type            BBPA;
         libs            ("libPhaseAveraging.so");
-        executeControl  timeStep;
-        executeInterval 1;
-        writeControl    writeTime;
-        
-        // Fields to average
-        fields          (U p k);
-        
-        // Period of oscillation in seconds
-        period          1.0;
-        
-        // Number of bins per period (default: 100)
-        nBins           50;
-        
-        // Starting cycle number (averaging begins from this cycle, default: 0)
-        startCycle      2;
-        
-        // Number of cycles to average (-1 for unlimited, default: -1)
-        cycles          -1;
-    }
-    
-    // Example for different settings
-    BBPA2
-    {
-        type            BBPA;
-        libs            ("libPhaseAveraging.so");
-        executeControl  timeStep;
-        executeInterval 1;
-        writeControl    writeTime;
-        
-        // Only average velocity field
+        executeControl  timeStep;    // accumulate EVERY step: BBPA is a
+        executeInterval 1;           // time integrator, not a sampler
+        writeControl    writeTime;   // write whenever the solver writes
+
         fields          (U);
-        
-        // Period of 0.5 seconds
-        period          0.5;
-        
-        // More bins for higher temporal resolution
-        nBins           100;
-        
-        // Start averaging immediately
-        startCycle      0;
-        
-        // Average only 10 cycles
-        cycles          10;
+        period          1.0;         // cycle period [s]
     }
-    
-    // Example for high frequency oscillations
-    BBPA3
+
+    // Every control spelled out.
+    bbpaFull
     {
         type            BBPA;
         libs            ("libPhaseAveraging.so");
         executeControl  timeStep;
         executeInterval 1;
         writeControl    writeTime;
-        
-        fields          (U p vorticity);
-        period          0.1;      // 10 Hz oscillation
-        nBins           50;       // 2ms resolution per bin
-        startCycle      3;        // Skip first 3 cycles for flow development
-        cycles          20;       // Average 20 cycles
+
+        // WHAT: a plain name gets every product; a { } after a name
+        // tunes it. Defaults: writePhaseMean on, secondMoment on,
+        // crossCycleVariance on, writePerCycle off.
+        fields
+        (
+            U { writePerCycle on; }              // U_Bin beside U_PA
+            p { secondMoment off; }              // skip <p p>
+        );
+
+        // The phase grid (also groupable as phaseGrid { ... }).
+        period          1.0;
+        nBins           50;          // binDeltaT = period/nBins = 0.02
+        phaseOrigin     0;           // phase 0 sits at t = 0
+        binAlignment    centred;     // window centred on the label | left
+        timeQuadrature  endPoint;    // the implemented rule (explicit)
+
+        // The cycle window.
+        discardCycles   1;           // skip the from-rest startup cycle
+        maxCycles       -1;          // unlimited
+
+        // WHICH bins exist in memory (locked by the restart signature) ...
+        accumulationSelection { mode all; }      // | list + bins ( ... )
+                                                 // | solverWriteTimes
+        // ... and which accumulated bins reach disk (serialisation only).
+        outputSelection { mode allAccumulated; } // | list + bins ( ... )
+
+        // WHERE and WHEN (never changes the numbers).
+        output
+        {
+            layout                  phaseAligned;  // | companion | both
+            cycleWriteInterval      1;   // dump once per completed cycle
+            meanWriteIntervalCycles 1;   // <= 0 = final write only
+            writeFinal              true;
+            writeProperties         true;          // restartable
+        }
+
+        // A field the solver may not create until later cycles:
+        // lazy (default) starts it when it appears; strict aborts at once.
+        fieldAvailability lazy;
     }
-
-    // --- Sparse-bin mode (optional) -----------------------------------
-    // Track only a few phase bins of interest at a large nBins, so the
-    // in-memory cost scales with the number of listed bins instead of
-    // with nBins. Useful for e.g. capturing peak systole and post-peak
-    // deceleration at high phase resolution without holding all I bins.
-    //   - Omit binsOfInterest (or give an empty list) for the original
-    //     full-bin behaviour: all nBins bins are tracked.
-    //   - When present, ONLY the listed bin indices are allocated and
-    //     written; all other bins are skipped (no extra cost/output).
-    // Bin index for phase phi is floor(phi/binDeltaT), binDeltaT=period/nBins.
-    BBPA_sparse
-    {
-        type            BBPA;
-        libs            ("libPhaseAveraging.so");
-        executeControl  timeStep;
-        executeInterval 1;
-        writeControl    writeTime;
-        writeMode       both;
-
-        fields          (U p wallShearStress);
-        period          0.5;      // cardiac period (120 bpm)
-        nBins           1000;     // fine phase resolution
-        // bin = floor(phi*nBins); for this waveform peak systole is at
-        // t=0.08s (phi=0.16) and post-peak deceleration at t=0.10s (phi=0.20).
-        binsOfInterest  (160 200); // phi=0.16 (peak), phi=0.20 (decel) only
-        startCycle      0;
-    }
-
-    // Direct comparison: Replace binBasedPhaseAverage with BBPA
-    // OLD (flawed sample averaging):
-    // binBasedPhaseAverage1 { type binBasedPhaseAverage; ... }
-    // 
-    // NEW (correct time integration):
-    // BBPA1 { type BBPA; ... }  // Same parameters, better math!
 }
-
-// SETUP IS IDENTICAL TO binBasedPhaseAverage - just replace the type name!
-// The improvement is internal: true time integration instead of sample averaging
-
-// Notes:
-// 1. BBPA implements TRUE time integration within bins (fixes binBasedPhaseAverage flaw)
-//    - Same parameters as binBasedPhaseAverage
-//    - Uses magnitude for vector/tensor fields
-//    - Performs time integration: φ_Bin,j = (1/Δt) ∫ φ(t) dt within each bin
-//    - Averages time-integrated bin data across multiple cycles
-//    - Properly handles variable time steps
-//
-// 2. Output fields:
-//    - Field bins: <fieldName>_BBPA_bin<N> (e.g., U_BBPA_bin0, U_BBPA_bin1, ...)
-//    - Variance: <fieldName>_BBPA_binVariance<N> (only written when cross-cycle data exists)
-//
-// 3. Bin calculation and time integration:
-//    - Bin index = min(floor(phase/binDeltaT), nBins-1)
-//    - binDeltaT = period/nBins
-//    - Each bin performs time integration: φ_Bin,j = (1/Δt) ∫ φ(t) dt
-//    - Accumulates: φ(t) * dt for each time step within the bin
-//    - Final bin value: total_sum / total_time
-//
-// 4. Write behavior:
-//    - If cross-cycle data exists: writes averaged data from multiple cycles
-//    - If only current cycle data: writes current cycle average for each bin
-//    - Only writes bins that have accumulated data
-//
-// 5. startCycle parameter:
-//    - Allows skipping initial cycles for flow development
-//    - Phase averaging begins from the specified cycle number
-//    - Useful for transient simulations that need time to reach periodic state
-//
-// 6. Example timeline with writeTime = 0.5s, period = 1.0s, startCycle = 2:
-//    - Cycles 0 and 1 are skipped (pre-averaging phase)
-//    - At t=1.5s (middle of cycle 2): writes U_BBPA_bin0 through U_BBPA_bin49
-//    - At t=2.5s (middle of cycle 3): writes updated bin files with more data
-//    - At t=3.0s (end of cycle 3): writes cross-cycle averaged data
-//
-// 7. Progress messages:
-//    - "Starting cycle X (phase averaging begins)"
-//    - "U bin averaging (time-integrated): Total cycles processed: X"
-//    - "Bins with cross-cycle data: X/Y"
-//    - "Bins with current cycle data: X/Y"
-//    - "Using time integration within bins"
 
 // ************************************************************************* //
