@@ -2,8 +2,8 @@
 """run_demos.py -- runnable demos for the BBPA study (docs/study/).
 
 Each demo is one small OpenFOAM case that changes ONE thing in the BBPA
-dictionary and shows the effect on disk. The case machinery is the test
-harness's (tests/bbpa_verify_lib.py): a 8-cell box whose U is overwritten
+dictionary and shows the effect on disk. The case machinery comes from
+the test suite (tests/bbpa_verify_lib.py): an 8-cell box whose U is overwritten
 every step by a coded function object with a bin-constant analytic signal
 (period 1 s, 8 bins), so runs are fast (~25-35 s each, dominated by the
 coded FO's one-off compile) and byte-reproducible.
