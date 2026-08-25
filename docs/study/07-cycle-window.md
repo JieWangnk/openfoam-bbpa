@@ -54,6 +54,25 @@ Against the baseline's 40 directories, `U_PA` now spans 32 starting at
 counts 4 folded cycles. An absent directory is the visible signature
 of a discarded cycle.
 
+## What discarding buys: a convergence picture
+
+![Convergence of U_PA with and without the startup cycle](figures/pa-convergence.png)
+
+This runs the chapter-01 tutorial for ten cycles, twice, and tracks
+the distance from the settled flow (the last cycle's own `U_Bin`) at
+the liveliest cell. In this laminar case each cycle's own `U_Bin` has
+settled to the file's write precision one cycle after startup (blue).
+The ensemble that folded the startup cycle never recovers within the
+run: averaging dilutes that first error by 1/N per cycle, so after
+nine cycles it still sits near 10⁻³ (orange, on the 1/N guide).
+Discarding one cycle puts the ensemble at the precision floor from
+its first fold (green). The ensemble mean is only as clean as the
+worst cycle it keeps.
+
+Regenerate with `python3 plot_convergence.py` (needs OpenFOAM; the
+two ten-cycle runs take about a minute together and are reused when
+already on disk).
+
 ## `maxCycles`
 
 `maxCycles N` freezes the ensemble after `N` kept cycles. Steps in
