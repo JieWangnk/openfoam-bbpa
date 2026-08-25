@@ -90,3 +90,21 @@ differs from `U_PA` at the same phase unless the flow repeats
 perfectly; that difference is the cycle-to-cycle variability that
 `U_PAVarianceMag` measures. The tutorial's `check_bbpa.py` turns these
 relations into an automated test.
+
+## The same story as a picture
+
+![U, U_Bin and U_PA at one probe cell of the bbpaVerify tutorial](figures/u-bin-pa.png)
+
+The gray trace is the instantaneous `U` at each solver write. Each
+blue segment is a `U_Bin`, drawn over its centred window, so you can
+see the windows straddling the labels (including the cycle boundary at
+t = 1 s and 2 s). Each orange diamond is the `U_PA` written at that
+label. The discarded startup cycle leaves nothing. Where the signal
+curves, a blue segment sits slightly off the gray line: a window's
+time mean differs from a point sample at its centre.
+
+Regenerate it from this folder, after chapter 01's tutorial run:
+
+```bash
+python3 plot_first_run.py
+```
