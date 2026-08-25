@@ -1,0 +1,26 @@
+demo: study_d08_accumulation_list
+chapter: 08-accumulation-selection.md
+
+case: study_d08_accumulation_list  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    accumulationSelection { mode list; bins (2 5); }
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                    10  0.25     4.625
+    U_PAVarianceMag          8  1.25     4.625
+    U_PA_UU                 10  0.25     4.625
+    U_PAmeanState            0  -        -
+    uniform/*Properties      6
+folded cycles at the newest checkpoint: U=5
+deprecation warnings in the log: 0

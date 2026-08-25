@@ -1,0 +1,26 @@
+demo: study_d10a_companion
+chapter: 10-output.md
+
+case: study_d10a_companion  (endTime 5, solver writeInterval 0.125)
+BBPA dictionary body:
+    fields          (U);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    output { layout companion; }
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                    33  1        5
+    U_PAVarianceMag          0  -        -
+    U_PA_UU                  0  -        -
+    U_PAmeanState            0  -        -
+    uniform/*Properties     41
+folded cycles at the newest checkpoint: U=5
+deprecation warnings in the log: 0

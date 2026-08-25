@@ -1,0 +1,26 @@
+demo: study_d10b_cadence
+chapter: 10-output.md
+
+case: study_d10b_cadence  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    output { cycleWriteInterval 2; meanWriteIntervalCycles 0; }
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                     8  4        4.875
+    U_PAVarianceMag          8  4        4.875
+    U_PA_UU                  8  4        4.875
+    U_PAmeanState            0  -        -
+    uniform/*Properties      6
+folded cycles at the newest checkpoint: U=5
+deprecation warnings in the log: 0

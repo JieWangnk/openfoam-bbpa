@@ -1,0 +1,26 @@
+demo: study_d10c_no_final
+chapter: 10-output.md
+
+case: study_d10c_no_final  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    output { writeFinal off; writeProperties off; cycleWriteInterval 4; }
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                     8  3        3.875
+    U_PAVarianceMag          8  3        3.875
+    U_PA_UU                  8  3        3.875
+    U_PAmeanState            0  -        -
+    uniform/*Properties      0
+folded cycles at the newest checkpoint: (no checkpoint on disk)
+deprecation warnings in the log: 0

@@ -1,0 +1,43 @@
+demo: study_d11_field_availability
+chapter: 11-field-availability.md
+
+case: study_d11_field_availability_lazy  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U wallShearStress);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    fieldAvailability lazy;
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                            dirs  first    last
+    U_Bin                              0  -        -
+    U_Bin_UU                           0  -        -
+    U_PA                              40  0        4.875
+    U_PAVarianceMag                   32  1        4.875
+    U_PA_UU                           40  0        4.875
+    U_PAmeanState                      0  -        -
+    wallShearStress_PA                 0  -        -
+    wallShearStress_PAVarianceMag      0  -        -
+    wallShearStress_PA_UU              0  -        -
+    uniform/*Properties                6
+folded cycles at the newest checkpoint: U=5
+deprecation warnings in the log: 0
+
+case: study_d11_field_availability_strict  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U wallShearStress);
+    period          1.0;
+    nBins           8;
+    discardCycles   0;
+    phaseOrigin     0;
+    fieldAvailability strict;
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: FATAL (expected). The error:
+    fieldAvailability strict: field 'wallShearStress' is not registered at the first retained accumulation interval. Ensure its producing function object runs before BBPA, or use fieldAvailability lazy.

@@ -1,0 +1,30 @@
+demo: study_d06_phase_grid
+chapter: 06-phase-grid.md
+
+case: study_d06_phase_grid  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U);
+    phaseGrid
+    {
+        period          1.0;
+        nBins           8;
+        phaseOrigin     0.125;
+        binAlignment    left;
+        timeQuadrature  endPoint;
+    }
+    discardCycles   0;
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                    32  0.125    4
+    U_PAVarianceMag         24  1.125    4
+    U_PA_UU                 32  0.125    4
+    U_PAmeanState            0  -        -
+    uniform/*Properties      6
+folded cycles at the newest checkpoint: U=4
+deprecation warnings in the log: 0

@@ -1,0 +1,25 @@
+demo: study_d07a_discard_cycles
+chapter: 07-cycle-window.md
+
+case: study_d07a_discard_cycles  (endTime 5, solver writeInterval 1)
+BBPA dictionary body:
+    fields          (U);
+    period          1.0;
+    nBins           8;
+    discardCycles   1;
+    phaseOrigin     0;
+    executeControl  timeStep;
+    executeInterval 1;
+    writeControl    writeTime;
+run: completed
+
+    file                  dirs  first    last
+    U_Bin                    0  -        -
+    U_Bin_UU                 0  -        -
+    U_PA                    32  1        4.875
+    U_PAVarianceMag         24  2        4.875
+    U_PA_UU                 32  1        4.875
+    U_PAmeanState            0  -        -
+    uniform/*Properties      6
+folded cycles at the newest checkpoint: U=4
+deprecation warnings in the log: 0
