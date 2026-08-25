@@ -1145,107 +1145,13 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         }
     }
 
-    // Output selection: which ACCUMULATED bins reach disk. A subset of
-    // the accumulation selection; unlike it, freely changeable across a
-    // restart (it gates serialisation only, never a statistic).
-    outputBins_.clear();
-    if (dict.found("outputSelection"))
-    {
-        const dictionary& os = dict.subDict("outputSelection");
-
-        forAllConstIter(dictionary, os, iter)
-        {
-            const word& k = iter().keyword();
-            if (k != "mode" && k != "bins")
-            {
-                FatalErrorInFunction
-                    << "unknown outputSelection entry '" << k
-                    << "'; valid: mode, bins."
-                    << exit(FatalError);
-            }
-        }
-
-        const word mode
-        (
-            os.lookupOrDefault<word>("mode", word("allAccumulated"))
-        );
-
-        if (mode == "accumulated" || mode == "all")
-        {
-            FatalErrorInFunction
-                << "outputSelection mode '" << mode << "' was renamed "
-                << "'allAccumulated' before release (an 'all' distinct "
-                << "from the accumulated set would violate the subset "
-                << "rule)."
-                << exit(FatalError);
-        }
-
-        if (mode == "list")
-        {
-            outputBins_ = os.lookup<labelList>("bins");
-            forAll(outputBins_, k)
-            {
-                const label b = outputBins_[k];
-                if (b < 0 || b >= nBins_)
-                {
-                    FatalErrorInFunction
-                        << "outputSelection bin " << b
-                        << " is out of range [0," << nBins_ << ")"
-                        << exit(FatalError);
-                }
-                if
-                (
-                    !binsOfInterest_.empty()
-                 && findIndex(binsOfInterest_, b) < 0
-                )
-                {
-                    FatalErrorInFunction
-                        << "outputSelection bin " << b << " is not in the "
-                        << "accumulation selection -- only accumulated "
-                        << "bins can be written."
-                        << exit(FatalError);
-                }
-            }
-        }
-        else if (mode != "allAccumulated")
-        {
-            FatalErrorInFunction
-                << "unknown outputSelection mode '" << mode
-                << "'; valid values: allAccumulated, list."
-                << exit(FatalError);
-        }
-    }
-
-    // Per-bin gates: accumulation (memory/statistics) and output (disk).
-    activeBinMap_ = boolList(nBins_, binsOfInterest_.empty());
-    forAll(binsOfInterest_, k)
-    {
-        activeBinMap_[binsOfInterest_[k]] = true;
-    }
-    if (outputBins_.empty())
-    {
-        outputBinMap_ = activeBinMap_;
-    }
-    else
-    {
-        outputBinMap_ = boolList(nBins_, false);
-        forAll(outputBins_, k)
-        {
-            outputBinMap_[outputBins_[k]] = true;
-        }
-
-        WarningInFunction
-            << "outputSelection is narrower than the accumulation: bins "
-            << "that are accumulated but not written have no on-disk "
-            << "checkpoint state and will COLD-START on a restart." << endl;
-    }
-
     // Output selection: which ACCUMULATED bins reach disk. Parsed after
     // the solverWriteTimes derivation so the subset check sees the
     // RESOLVED accumulation set. Unlike the accumulation selection this
-    // may change across a restart (it gates serialisation only) -- but a
-    // bin accumulated and never written has no on-disk state, so it is
-    // not restart-recoverable (warned below).
+    // may change across a restart: it gates serialisation only. The
+    // ensemble state of every accumulated bin is checkpointed regardless,
+    // under the *State spellings (see BBPAWriterTemplates.C), so bins
+    // outside the selection stay restart-complete.
     outputBins_.clear();
     if (dict.found("outputSelection"))
     {

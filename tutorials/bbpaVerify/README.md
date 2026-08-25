@@ -58,8 +58,8 @@ outputSelection { mode list; bins (2 5); }         // write a subset of them
 `accumulationSelection` decides which bins EXIST IN MEMORY (it shapes the
 statistics and is locked by the restart signature); `outputSelection`
 decides which accumulated bins reach DISK (a serialisation choice — it may
-change across a restart, but bins never written have no on-disk state and
-cold-start on restart). `solverWriteTimes` is a co-location convenience
+change across a restart; bins outside it keep checkpoint-only `*State`
+files, so no history is lost). `solverWriteTimes` is a co-location convenience
 for tutorials; publication runs should use explicit `list` indices.
 
 `solverWriteTimes` requires the solver's `writeControl

@@ -67,9 +67,7 @@ new rows are the point:
 The ensemble state of every accumulated bin is checkpointed under the
 `*State` spellings regardless of the output selection, so a restart
 restores all eight bins and the selection can be widened later without
-losing history. (The run also prints an older warning claiming
-unwritten bins cold-start on restart; that text predates the `*State`
-checkpoint, and the manifest above shows the state is on disk.)
+losing history.
 
 Use this control when a fine accumulation grid would flood the disk:
 compute everything, publish the phases you need now, and re-publish
