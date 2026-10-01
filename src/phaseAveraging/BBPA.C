@@ -26,6 +26,7 @@ License
 #include "BBPA.H"
 #include "volFields.H"
 #include "Time.H"
+#include "timeDirName.H"
 #include "addToRunTimeSelectionTable.H"
 #include "timeIOdictionary.H"
 #include "IFstream.H"
@@ -293,7 +294,12 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
         {
             const scalar labelTime = clock_.binLabelTime(cyc, binI);
             const fileName binFile =
-                mesh_.time().path()/Time::timeName(labelTime)
+                mesh_.time().path()
+               /timeDirName
+                (
+                    mesh_.time(), labelTime,
+                    timeDirTol(binDeltaT_, mesh_.time().deltaTValue())
+                )
                /(fieldNames_[0] + "_Bin");
             recoverable = Foam::isFile(binFile);
         }
@@ -2091,13 +2097,17 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             {
                 legacyStart_probed_ = true;
                 const fileName base = obr_.time().path();
+                const scalar tol =
+                    timeDirTol(binDeltaT_, obr_.time().deltaTValue());
                 const bool newOk = Foam::isFile
                 (
-                    base/Time::timeName(checkpointCycleStart_)/(probe + "_PA")
+                    base/timeDirName(obr_.time(), checkpointCycleStart_, tol)
+                   /(probe + "_PA")
                 );
                 const bool oldOk = Foam::isFile
                 (
-                    base/Time::timeName(legacyStart)/(probe + "_PA")
+                    base/timeDirName(obr_.time(), legacyStart, tol)
+                   /(probe + "_PA")
                 );
                 if (!newOk && oldOk)
                 {

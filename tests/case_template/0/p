@@ -1,0 +1,29 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Pressure. zeroGradient everywhere with a reference cell (fvSolution) so the   |
+| trivial uniform solve is well posed. Not tracked by BBPA in the base run.    |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    walls
+    {
+        type            zeroGradient;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //

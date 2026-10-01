@@ -1,0 +1,29 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Initial U. Overwritten every step by the coded prescribe FO; zeroGradient    |
+| walls make the trivial solve a no-op so BBPA always sees the analytic field. |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    walls
+    {
+        type            zeroGradient;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //

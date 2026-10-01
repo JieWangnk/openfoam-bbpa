@@ -1,0 +1,50 @@
+#!/bin/sh
+# Alltest -- run the full BBPA verification suite; nonzero exit on any failure.
+#
+# Requires: an OpenFOAM 14 environment (source /opt/openfoam14/etc/bashrc)
+# with libPhaseAveraging.so built to $FOAM_USER_LIBBIN (cd ../src/phaseAveraging
+# && wmake libso), python3 + numpy.
+#
+# Each test is also pytest-compatible: python3 -m pytest tests/ -q
+
+cd "${0%/*}" || exit 1
+
+if ! command -v foamRun >/dev/null 2>&1; then
+    echo "Alltest: foamRun not on PATH -- source the OpenFOAM environment first" >&2
+    exit 2
+fi
+
+status=0
+for t in \
+    test_fixedDt \
+    test_writeModes \
+    test_restart \
+    test_restartNames \
+    test_variableDt \
+    test_options \
+    test_dictNames \
+    test_products \
+    test_restartMeta \
+    test_output \
+    test_selection \
+    test_centred \
+    test_parallel \
+    test_memory \
+    test_invalidInput
+do
+    echo "==== $t ===="
+    if python3 "$t.py"; then
+        echo "==== $t: PASS ===="
+    else
+        echo "==== $t: FAIL ===="
+        status=1
+    fi
+    echo
+done
+
+if [ "$status" -eq 0 ]; then
+    echo "Alltest: ALL PASS"
+else
+    echo "Alltest: FAILURES (see above)"
+fi
+exit $status
