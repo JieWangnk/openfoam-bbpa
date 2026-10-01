@@ -42,26 +42,28 @@ namespace functionObjects
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
+// Phase/cycle classification goes through the shared phaseClock (see
+// phaseClock.H): IPA's former private copies of this arithmetic used plain
+// truncation and so lacked the clock-drift snap fix BBPA received -- the
+// bin/cycle assignment could differ between the two objects on the very same
+// solver step.
+
 Foam::label Foam::functionObjects::IPA::currentCycleNumber() const
 {
-    const scalar t = time_.value() - startTime_;
-    return label(t / period_);
+    return clock_.cycleNumber(time_.value());
 }
 
 
 Foam::label Foam::functionObjects::IPA::currentPhaseIndex() const
 {
-    const scalar t = time_.value() - startTime_;
-    const scalar phase = std::fmod(t, period_);
-    return label(phase / phaseInterval_);
+    return clock_.phaseBin(time_.value());
 }
 
 
 bool Foam::functionObjects::IPA::isAtPhasePoint(label& phaseIndex) const
 {
-    const scalar t = time_.value() - startTime_;
-    const scalar phase = std::fmod(t, period_);
-    
+    const scalar phase = clock_.wrapPhase(time_.value());
+
     // Check each phase point to see if we're within tolerance
     for (label i = 0; i < nPhases_; i++)
     {
@@ -282,15 +284,27 @@ bool Foam::functionObjects::IPA::read(const dictionary& dict)
     nPhases_ = dict.lookupOrDefault("nPhases", 50);
     startCycle_ = dict.lookupOrDefault("startCycle", 0);
     phaseTolerance_ = dict.lookupOrDefault("phaseTolerance", 0.01);
-    
+
+    // Optional phase origin override.  If set, IPA target phases are
+    //   phi_i = startTime + i * (period / nPhases).
+    // Default behaviour (no override) sets startTime_ to the runTime
+    // value at construction.  Override is used to align IPA samples
+    // with BBPA bin centres (set startTime to half a bin width).
+    if (dict.found("startTime"))
+    {
+        startTime_ = dict.lookup<scalar>("startTime");
+    }
+
     phaseInterval_ = period_ / scalar(nPhases_);
-    
+    clock_.reset(period_, nPhases_, startTime_, false);
+
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
         << "    Number of phase points: " << nPhases_ << nl
         << "    Phase interval: " << phaseInterval_ << " s" << nl
         << "    Phase tolerance: " << phaseTolerance_ << " s" << nl
         << "    Start cycle: " << startCycle_ << nl
+        << "    Phase origin (startTime): " << startTime_ << " s" << nl
         << "    Fields: " << fieldNames_ << endl;
     
     return true;

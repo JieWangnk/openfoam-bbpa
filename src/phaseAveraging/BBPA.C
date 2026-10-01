@@ -31,6 +31,7 @@ License
 #include "IFstream.H"
 #include "DynamicList.H"
 #include "Switch.H"
+#include "wordAndDictionary.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -46,56 +47,38 @@ namespace functionObjects
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
-// Snap a value that is within a whisker of a whole number onto it, then
-// truncate. Needed because the natural expression label(x) is exact only when
-// x is not sitting on an integer boundary -- and in production it almost always
-// IS: a case with period 0.5 and I=50 has a bin width of 0.01, equal to its
-// writeInterval, so EVERY bin edge lands on a solver time.
-//
-// The failure is not hypothetical. fmod(2.9, 1.0) returns 0.8999999999999999,
-// not 0.9, so 0.8999999999999999/0.05 = 17.999999999999996 truncates to bin 17
-// when the step belongs in bin 18. The error grows with t (the mantissa has
-// fewer bits left for the fraction), which is why a run drifts from 51 steps
-// per bin in the first cycle to 49 by the third instead of a constant 50.
-//
-// Whether a given step lands right therefore depended on the last bit of
-// OpenFOAM's accumulated clock. At I=200 a bin can be only ~25 timesteps wide,
-// so one misplaced step is ~4% of the bin.
-//
-// The tolerance is in BIN UNITS and is ~7 orders of magnitude smaller than the
-// timestep-to-bin ratio of any sane configuration, so it can only ever absorb
-// floating-point noise, never a step that genuinely belongs to the lower bin.
-static inline Foam::label bbpaSnapFloor(const Foam::scalar x)
-{
-    const Foam::scalar r = std::floor(x);
-    return Foam::label((x - r) > (1.0 - 1e-9) ? r + 1.0 : r);
-}
-
+// All phase/cycle/bin boundary arithmetic -- the snapped floor, the fmod
+// wrap-around guard, the label/phase origins -- lives in phaseClock (see
+// phaseClock.H for the full rationale). These wrappers exist so every caller
+// classifies the CURRENT solver instant the same way.
 
 Foam::label Foam::functionObjects::BBPA::phaseBin() const
 {
-    // phaseOrigin_ == startTime_ normally; startTime_ - dT/2 when binCentred_,
-    // which makes bin j cover [j*dT - dT/2, j*dT + dT/2) in the user's phase,
-    // i.e. CENTRED on its label time j*dT rather than starting there.
-    const scalar t = time_.value() - phaseOrigin_;
-    scalar phase = std::fmod(t, period_);
-
-    // fmod can return period-1ulp instead of 0 for an on-grid time, which
-    // would put the first step of a cycle in the LAST bin of that cycle.
-    if (phase > period_*(1.0 - 1e-12)) phase = 0;
-
-    return min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+    return clock_.phaseBin(time_.value());
 }
 
 
 Foam::label Foam::functionObjects::BBPA::currentCycleNumber() const
 {
-    // Must use the SAME origin as phaseBin(): with binCentred_ the cycle runs
-    // [n*T - dT/2, (n+1)*T - dT/2) so that bin 0, centred on phase 0, lies
-    // wholly inside one cycle instead of straddling the boundary and losing
-    // its first half to the cycle reset.
-    const scalar t = time_.value() - phaseOrigin_;
-    return bbpaSnapFloor(t/period_);
+    return clock_.cycleNumber(time_.value());
+}
+
+
+Foam::functionObjects::binProducts
+Foam::functionObjects::BBPA::resolveProducts(const word& fieldName) const
+{
+    // writePerCycle defaults to the global "bin" writeMode (which needs
+    // the per-cycle capture for every field). Must stay in step with the
+    // checkpoint signature validation, which re-resolves on restart.
+    binProducts prods;
+    const dictionary& fd = fieldOptions_[fieldName];
+    prods.writeMean = fd.lookupOrDefault<Switch>("writePhaseMean", true);
+    prods.secondMoment = fd.lookupOrDefault<Switch>("secondMoment", true);
+    prods.crossCycleVariance =
+        fd.lookupOrDefault<Switch>("crossCycleVariance", true);
+    prods.writePerCycle =
+        fd.lookupOrDefault<Switch>("writePerCycle", binNaming_);
+    return prods;
 }
 
 
@@ -122,6 +105,8 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
             continue;
         }
 
+        const binProducts prods = resolveProducts(fieldName);
+
         if (mesh_.foundObject<volScalarField>(fieldName))
         {
             scalarBinItems_.insert
@@ -131,7 +116,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<scalar>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
+                        fieldName, mesh_, nBins_, binsOfInterest_, prods
                     )
                 )
             );
@@ -146,7 +131,7 @@ bool Foam::functionObjects::BBPA::initializeBinItems()
                 (
                     new binItem<vector>
                     (
-                        fieldName, mesh_, nBins_, binsOfInterest_, binNaming_
+                        fieldName, mesh_, nBins_, binsOfInterest_, prods
                     )
                 )
             );
@@ -219,9 +204,9 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
     // already passed are written, so every directory touched is at or behind
     // the solver clock -- never ahead of it, which is what made restart cleanup
     // delete live bin data in an earlier version.
-    const scalar cycleStart = startTime_ + cycle*period_;
+    const scalar cycleStart = clock_.cycleStart(cycle);
     const scalar now = time_.value();
-    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+    const scalar centreOffset = clock_.centreOffset();
 
     // Never persist the bin a restart landed inside: it covers only part of its
     // window this cycle, and a file written from it would be recovered later as
@@ -230,16 +215,18 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins
+        writer::flushClosedBins
         (
-            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), outputBinMap_, time_, cycleStart, binDeltaT_, now,
+            skip, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        iter()->writeCurrentCycleBins
+        writer::flushClosedBins
         (
-            time_, cycleStart, binDeltaT_, now, skip, centreOffset
+            *iter(), outputBinMap_, time_, cycleStart, binDeltaT_, now,
+            skip, centreOffset
         );
     }
 }
@@ -247,23 +234,23 @@ void Foam::functionObjects::BBPA::flushCurrentCycleBins(const label cycle)
 
 Foam::label Foam::functionObjects::BBPA::restoreCurrentCycle()
 {
-    const scalar cycleStart = startTime_ + currentCycle_*period_;
+    const scalar cycleStart = clock_.cycleStart(currentCycle_);
     const scalar now = time_.value();
-    const scalar centreOffset = binCentred_ ? 0.5*binDeltaT_ : 0.0;
+    const scalar centreOffset = clock_.centreOffset();
     label n = 0;
 
     forAllIter(HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter)
     {
-        n += iter()->restoreCurrentCycleBins
+        n += state::restoreClosedBins
         (
-            mesh_, cycleStart, binDeltaT_, now, centreOffset
+            *iter(), mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
     forAllIter(HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter)
     {
-        n += iter()->restoreCurrentCycleBins
+        n += state::restoreClosedBins
         (
-            mesh_, cycleStart, binDeltaT_, now, centreOffset
+            *iter(), mesh_, cycleStart, binDeltaT_, now, centreOffset
         );
     }
 
@@ -288,27 +275,23 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
     // the start phase lies STRICTLY INSIDE it. Beginning exactly on a bin edge
     // (the ordinary uncentred cold start) covers the bin fully and must not be
     // dropped.
-    const scalar tRes = runStartTime_ - phaseOrigin_;
-    scalar phase = std::fmod(tRes, period_);
-    if (phase > period_*(1.0 - 1e-12)) phase = 0;
-
-    const label binI = min(bbpaSnapFloor(phase/binDeltaT_), nBins_ - 1);
+    const scalar phase = clock_.wrapPhase(runStartTime_);
+    const label binI = clock_.phaseBin(runStartTime_);
     const scalar binStart = binI*binDeltaT_;
-    const label cyc = bbpaSnapFloor(tRes/period_);
+    const label cyc = clock_.cycleNumber(runStartTime_);
 
     if (phase - binStart > 1e-9*binDeltaT_)
     {
         // If this straddled bin's COMPLETE _Bin is already on disk, the run
         // resumed from a write EARLIER than the one that closed this bin, so
-        // restoreCurrentCycleBins recovered the whole window -- do NOT drop it.
+        // state::restoreClosedBins recovered the whole window -- do NOT drop it.
         // Only drop when it is genuinely unrecoverable: the cold-start bin 0
         // (nothing on disk yet), or a restart from the very write that straddles
         // a bin whose window had not closed (hence not flushed) before the kill.
         bool recoverable = false;
         if (binNaming_ && !fieldNames_.empty())
         {
-            const scalar labelTime =
-                startTime_ + cyc*period_ + binI*binDeltaT_;
+            const scalar labelTime = clock_.binLabelTime(cyc, binI);
             const fileName binFile =
                 mesh_.time().path()/Time::timeName(labelTime)
                /(fieldNames_[0] + "_Bin");
@@ -365,8 +348,7 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
     // silently averaging real cycles against a phantom zero.  Stamping the
     // window the data belongs to keeps every bin dir at or behind the solver
     // clock, so the cleanup never touches it and no cleanup change is needed.
-    const scalar cycleStart =
-        startTime_ + max(currentCycle_ - 1, 0) * period_;
+    const scalar cycleStart = clock_.cycleStart(max(currentCycle_ - 1, 0));
 
     forAllConstIter
     (
@@ -375,8 +357,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
         iter
     )
     {
-        iter()->write
+        writer::phaseAligned
         (
+            *iter(), outputBinMap_, 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -391,8 +374,9 @@ void Foam::functionObjects::BBPA::writeAllAveragedFields(const bool emitPA)
         iter
     )
     {
-        iter()->write
+        writer::phaseAligned
         (
+            *iter(), outputBinMap_, 
             time_, nBins_, currentCycle_, currentBin_,
             cycleStart, binDeltaT_,
             binNaming_ ? word("_BinPA") : word("_PA"),
@@ -411,14 +395,14 @@ void Foam::functionObjects::BBPA::writeCompanionAllFields()
         HashTable<autoPtr<binItem<scalar>>>, scalarBinItems_, iter
     )
     {
-        iter()->writeCompanion(time_, currentBin_);
+        writer::companion(*iter(), outputBinMap_, time_, currentBin_);
     }
     forAllConstIter
     (
         HashTable<autoPtr<binItem<vector>>>, vectorBinItems_, iter
     )
     {
-        iter()->writeCompanion(time_, currentBin_);
+        writer::companion(*iter(), outputBinMap_, time_, currentBin_);
     }
 }
 
@@ -439,12 +423,20 @@ Foam::functionObjects::BBPA::BBPA
     cycles_(-1),
     startCycle_(0),
     startTime_(0),
+    phaseOriginExplicit_(false),
     binDeltaT_(0),
     currentCycle_(0),
     previousCycle_(-1),
     currentBin_(-1),
     previousBin_(-1),
     lastFullWriteCycle_(-1),
+    timeQuadrature_("endPoint"),
+    fieldAvailabilityStrict_(false),
+    availabilityChecked_(false),
+    layout_("phaseAligned"),
+    cycleWriteInterval_(0),
+    writeFinal_(true),
+    writeProperties_(true),
     binNaming_(false),
     binsAtWriteTimes_(false),
     binCentred_(false),
@@ -489,27 +481,276 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 {
     fvMeshFunctionObject::read(dict);
 
-    dict.lookup("fields") >> fieldNames_;
-    dict.lookup("period") >> period_;
-    nBins_ = dict.lookupOrDefault("nBins", 100);
-    cycles_ = dict.lookupOrDefault("cycles", -1);
-    startCycle_ = dict.lookupOrDefault("startCycle", 0);
-
-    // Optional sparse-bin mode: only track the listed bin indices.
-    // Default empty list = track all nBins_ bins (original behaviour).
-    binsOfInterest_ =
-        dict.lookupOrDefault<labelList>("binsOfInterest", labelList());
-
-    // Validate any supplied bin indices against [0, nBins_).
-    forAll(binsOfInterest_, k)
+    // fields: a plain list -- fields (U p) -- or the v2 annotated form with
+    // per-field product options after any entry:
+    //     fields ( U  p { secondMoment off; crossCycleVariance off; } );
+    // Options: writePhaseMean, secondMoment, crossCycleVariance,
+    // writePerCycle (each a Switch; defaults in initializeBinItems()). An
+    // unknown option word aborts -- a typo must not silently keep the
+    // default. writePhaseMean gates only the _PA FILE: the mean always
+    // accumulates, so crossCycleVariance works with it off (the mean chain
+    // is then persisted as the checkpoint-only meanState file).
+    fieldNames_.clear();
+    fieldOptions_.clear();
     {
-        const label b = binsOfInterest_[k];
-        if (b < 0 || b >= nBins_)
+        List<wordAndDictionary> specs(dict.lookup("fields"));
+        forAll(specs, i)
+        {
+            const word& fname = specs[i].first();
+            const dictionary& fd = specs[i].second();
+
+            forAllConstIter(dictionary, fd, iter)
+            {
+                const word& k = iter().keyword();
+                if
+                (
+                    k != "writePhaseMean"
+                 && k != "secondMoment"
+                 && k != "crossCycleVariance"
+                 && k != "writePerCycle"
+                )
+                {
+                    FatalErrorInFunction
+                        << "unknown per-field option '" << k << "' for field "
+                        << fname << "; valid options: writePhaseMean, "
+                        << "secondMoment, crossCycleVariance, writePerCycle."
+                        << exit(FatalError);
+                }
+            }
+
+            fieldNames_.append(fname);
+            fieldOptions_.set(fname, fd);
+        }
+    }
+    // The phase grid may be grouped in a phaseGrid{} sub-dictionary
+    // (period, nBins, phaseOrigin, binAlignment) or given flat; not both.
+    const dictionary* gridPtr = &dict;
+    if (dict.found("phaseGrid"))
+    {
+        if
+        (
+            dict.found("period") || dict.found("nBins")
+         || dict.found("phaseOrigin") || dict.found("binAlignment")
+        )
         {
             FatalErrorInFunction
-                << "binsOfInterest entry " << b
-                << " is out of range [0," << nBins_ << ")"
+                << "give the phase grid either in phaseGrid{} or as flat "
+                << "entries, not both."
                 << exit(FatalError);
+        }
+        gridPtr = &dict.subDict("phaseGrid");
+        forAllConstIter(dictionary, *gridPtr, iter)
+        {
+            const word& k = iter().keyword();
+            if
+            (
+                k != "period" && k != "nBins"
+             && k != "phaseOrigin" && k != "binAlignment"
+             && k != "timeQuadrature"
+            )
+            {
+                FatalErrorInFunction
+                    << "unknown phaseGrid entry '" << k << "'; valid: "
+                    << "period, nBins, phaseOrigin, binAlignment, "
+                    << "timeQuadrature."
+                    << exit(FatalError);
+            }
+        }
+    }
+    const dictionary& grid = *gridPtr;
+
+    grid.lookup("period") >> period_;
+    nBins_ = grid.lookupOrDefault("nBins", 100);
+
+    // The time-quadrature rule is part of the numerical contract: the
+    // step's single sample is treated as constant over its interval
+    // (first-order, "endPoint"). Explicit so a future trapezoidal
+    // implementation cannot silently change the meaning of a case; part
+    // of the checkpoint signature for the same reason.
+    timeQuadrature_ =
+        grid.lookupOrDefault<word>("timeQuadrature", word("endPoint"));
+    if (timeQuadrature_ != "endPoint")
+    {
+        FatalErrorInFunction
+            << "unknown timeQuadrature '" << timeQuadrature_
+            << "'; this build implements: endPoint."
+            << exit(FatalError);
+    }
+
+    // v2 names, with one release of compatibility for the deprecated ones.
+    // Each old name still works alone (with a warning); giving old and new
+    // together is ambiguous and aborts.
+
+    // maxCycles (deprecated: cycles) -- stop after N completed cycles
+    cycles_ = dict.lookupOrDefault("maxCycles", -1);
+    if (dict.found("cycles"))
+    {
+        if (dict.found("maxCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'maxCycles' and its deprecated spelling 'cycles' "
+                << "given; keep only 'maxCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'cycles' is deprecated; use 'maxCycles'." << endl;
+        cycles_ = dict.lookup<label>("cycles");
+    }
+
+    // discardCycles (deprecated: startCycle) -- skip the first N cycles
+    startCycle_ = dict.lookupOrDefault("discardCycles", 0);
+    if (dict.found("startCycle"))
+    {
+        if (dict.found("discardCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'discardCycles' and its deprecated spelling "
+                << "'startCycle' given; keep only 'discardCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'startCycle' is deprecated; use 'discardCycles'."
+            << endl;
+        startCycle_ = dict.lookup<label>("startCycle");
+    }
+
+    fieldAvailabilityStrict_ = false;
+    {
+        const word fa
+        (
+            dict.lookupOrDefault<word>("fieldAvailability", word("lazy"))
+        );
+        if (fa == "strict")
+        {
+            fieldAvailabilityStrict_ = true;
+        }
+        else if (fa != "lazy")
+        {
+            FatalErrorInFunction
+                << "unknown fieldAvailability '" << fa
+                << "'; valid values: lazy, strict."
+                << exit(FatalError);
+        }
+    }
+
+    if (fieldNames_.empty())
+    {
+        FatalErrorInFunction
+            << "'fields' is empty; give at least one field to phase-average, "
+            << "e.g. fields (U)."
+            << exit(FatalError);
+    }
+
+    if (period_ <= 0)
+    {
+        FatalErrorInFunction
+            << "'period' must be positive; got " << period_
+            << ". Set it to the cycle period in seconds."
+            << exit(FatalError);
+    }
+
+    if (nBins_ <= 0)
+    {
+        FatalErrorInFunction
+            << "'nBins' must be positive; got " << nBins_
+            << ". It is the number of phase bins per period."
+            << exit(FatalError);
+    }
+
+    // Accumulation selection: which bins EXIST IN MEMORY (and hence in
+    // the statistics). Separate from outputSelection, which decides which
+    // accumulated bins reach disk.
+    //   accumulationSelection { mode all; }              all nBins (default)
+    //   accumulationSelection { mode list; bins (2 5); } sparse-bin mode
+    //   accumulationSelection { mode solverWriteTimes; } derived from the
+    //                                                    solver's writes
+    // Deprecated spellings (one release): binsOfInterest (= mode list),
+    // binsAtWriteTimes (= mode solverWriteTimes).
+    binsOfInterest_.clear();
+    binsAtWriteTimes_ = false;
+
+    // 'phaseSelection' conflated two different decisions and was renamed
+    // before any release; abort rather than silently ignore the entry.
+    if (dict.found("phaseSelection"))
+    {
+        FatalErrorInFunction
+            << "'phaseSelection' was split into two controls: which bins "
+            << "are CALCULATED is accumulationSelection{}; which "
+            << "accumulated bins are WRITTEN is outputSelection{}."
+            << exit(FatalError);
+    }
+
+    if (dict.found("accumulationSelection"))
+    {
+        if (dict.found("binsOfInterest") || dict.found("binsAtWriteTimes"))
+        {
+            FatalErrorInFunction
+                << "give either 'accumulationSelection' or the deprecated "
+                << "'binsOfInterest'/'binsAtWriteTimes' entries, not both."
+                << exit(FatalError);
+        }
+
+        const dictionary& ps = dict.subDict("accumulationSelection");
+        const word mode(ps.lookupOrDefault<word>("mode", word("all")));
+
+        if (mode == "list")
+        {
+            binsOfInterest_ = ps.lookup<labelList>("bins");
+        }
+        else if (mode == "solverWriteTimes")
+        {
+            binsAtWriteTimes_ = true;
+        }
+        else if (mode != "all")
+        {
+            FatalErrorInFunction
+                << "unknown accumulationSelection mode '" << mode
+                << "'; valid values: all, list, solverWriteTimes."
+                << exit(FatalError);
+        }
+    }
+    else
+    {
+        if (dict.found("binsOfInterest"))
+        {
+            WarningInFunction
+                << "BBPA entry 'binsOfInterest' is deprecated; use "
+                << "accumulationSelection { mode list; bins (...); }."
+                << endl;
+            binsOfInterest_ = dict.lookup<labelList>("binsOfInterest");
+        }
+        if (dict.found("binsAtWriteTimes"))
+        {
+            WarningInFunction
+                << "BBPA entry 'binsAtWriteTimes' is deprecated; use "
+                << "accumulationSelection { mode solverWriteTimes; }."
+                << endl;
+            binsAtWriteTimes_ =
+                dict.lookup<Switch>("binsAtWriteTimes");
+        }
+    }
+
+    // Validate any supplied bin indices against [0, nBins_), rejecting
+    // duplicates (a duplicate would double-account that bin's statistics).
+    {
+        labelHashSet seen;
+        forAll(binsOfInterest_, k)
+        {
+            const label b = binsOfInterest_[k];
+            if (b < 0 || b >= nBins_)
+            {
+                FatalErrorInFunction
+                    << "binsOfInterest entry " << b
+                    << " is out of range [0," << nBins_ << ")"
+                    << exit(FatalError);
+            }
+            if (!seen.insert(b))
+            {
+                FatalErrorInFunction
+                    << "binsOfInterest entry " << b
+                    << " is listed more than once; give each bin index once."
+                    << exit(FatalError);
+            }
         }
     }
 
@@ -521,6 +762,24 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         "writeMode", word("phaseAlignedDirs")
     );
 
+    // A misspelt writeMode must not silently fall through to the default
+    // layout: the write() dispatch treats every unknown word as
+    // "phaseAlignedDirs".
+    if
+    (
+        writeMode_ != "phaseAlignedDirs"
+     && writeMode_ != "perCycle"
+     && writeMode_ != "companion"
+     && writeMode_ != "both"
+     && writeMode_ != "bin"
+    )
+    {
+        FatalErrorInFunction
+            << "unknown writeMode '" << writeMode_ << "'; valid values: "
+            << "phaseAlignedDirs, perCycle, companion, both, bin."
+            << exit(FatalError);
+    }
+
     // "bin" mode: <field>_Bin / _BinPA / _BinPA_UU / _BinPAVariance naming,
     // plus the extra per-cycle _Bin file. Everything else behaves as
     // "perCycle" (one full dump per completed cycle).
@@ -528,26 +787,217 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
 
     // How often the cross-cycle _BinPA* files are written, in completed
     // cycles. The per-cycle _Bin file is always written.
-    paWriteInterval_ = dict.lookupOrDefault<label>("PAwriteInterval", 1);
+    // meanWriteIntervalCycles (deprecated: PAwriteInterval)
+    paWriteInterval_ =
+        dict.lookupOrDefault<label>("meanWriteIntervalCycles", 1);
+    if (dict.found("PAwriteInterval"))
+    {
+        if (dict.found("meanWriteIntervalCycles"))
+        {
+            FatalErrorInFunction
+                << "both 'meanWriteIntervalCycles' and its deprecated "
+                << "spelling 'PAwriteInterval' given; keep only "
+                << "'meanWriteIntervalCycles'."
+                << exit(FatalError);
+        }
+        WarningInFunction
+            << "BBPA entry 'PAwriteInterval' is deprecated; use "
+            << "'meanWriteIntervalCycles'." << endl;
+        paWriteInterval_ = dict.lookup<label>("PAwriteInterval");
+    }
+
+    // ---- output{} (v2): WHERE and WHEN results are written ---------------
+    // Per-field options decide WHAT exists; this block decides layout and
+    // cadence; the accumulator has one numerical meaning throughout.
+    // Legacy writeMode words translate onto the same internals for one
+    // release (deprecated); the per-cycle _Bin capture is NOT a layout --
+    // it is the per-field writePerCycle product.
+    layout_ = "phaseAligned";
+    cycleWriteInterval_ = 0;          // legacy default: dump at every write
+    writeFinal_ = true;
+    writeProperties_ = true;
+
+    if (dict.found("output"))
+    {
+        if
+        (
+            dict.found("writeMode")
+         || dict.found("PAwriteInterval")
+         || dict.found("meanWriteIntervalCycles")
+        )
+        {
+            FatalErrorInFunction
+                << "give either 'output' or the deprecated "
+                << "'writeMode'/'PAwriteInterval'/'meanWriteIntervalCycles' "
+                << "entries, not both ('meanWriteIntervalCycles' moves "
+                << "inside output{})."
+                << exit(FatalError);
+        }
+
+        const dictionary& od = dict.subDict("output");
+
+        forAllConstIter(dictionary, od, iter)
+        {
+            const word& k = iter().keyword();
+            if
+            (
+                k != "layout"
+             && k != "cycleWriteInterval"
+             && k != "meanWriteIntervalCycles"
+             && k != "writeFinal"
+             && k != "writeProperties"
+            )
+            {
+                FatalErrorInFunction
+                    << "unknown output option '" << k << "'; valid options: "
+                    << "layout, cycleWriteInterval, meanWriteIntervalCycles, "
+                    << "writeFinal, writeProperties."
+                    << exit(FatalError);
+            }
+        }
+
+        layout_ = od.lookupOrDefault<word>("layout", word("phaseAligned"));
+        if
+        (
+            layout_ != "phaseAligned"
+         && layout_ != "companion"
+         && layout_ != "both"
+        )
+        {
+            FatalErrorInFunction
+                << "unknown output layout '" << layout_ << "'; valid "
+                << "values: phaseAligned, companion, both. (The per-cycle "
+                << "_Bin capture is the per-field writePerCycle option, "
+                << "not a layout.)"
+                << exit(FatalError);
+        }
+
+        cycleWriteInterval_ =
+            od.lookupOrDefault<label>("cycleWriteInterval", 1);
+        if (cycleWriteInterval_ < 0)
+        {
+            FatalErrorInFunction
+                << "'cycleWriteInterval' must be >= 0 (0 = at every "
+                << "write); got " << cycleWriteInterval_ << "."
+                << exit(FatalError);
+        }
+
+        paWriteInterval_ =
+            od.lookupOrDefault<label>("meanWriteIntervalCycles", 1);
+        writeFinal_ = od.lookupOrDefault<Switch>("writeFinal", true);
+        writeProperties_ =
+            od.lookupOrDefault<Switch>("writeProperties", true);
+
+        // v2 output has ONE naming (_PA*); the _BinPA spelling belongs to
+        // the legacy bin writeMode only.
+        binNaming_ = false;
+
+        if (!writeProperties_)
+        {
+            WarningInFunction
+                << "output.writeProperties is off: no restart checkpoint "
+                << "will be written; this run cannot be restarted." << endl;
+        }
+    }
+    else
+    {
+        if (dict.found("writeMode"))
+        {
+            WarningInFunction
+                << "BBPA entry 'writeMode' is deprecated; use "
+                << "output { layout phaseAligned|companion|both; ... } "
+                << "with the per-field writePerCycle product for the "
+                << "per-cycle _Bin capture." << endl;
+        }
+
+        // Legacy translation onto the same internals.
+        if (writeMode_ == "companion")
+        {
+            layout_ = "companion";
+        }
+        else if (writeMode_ == "both")
+        {
+            layout_ = "both";
+            cycleWriteInterval_ = -1;   // dump at the final write only
+        }
+        else if (writeMode_ == "perCycle" || writeMode_ == "bin")
+        {
+            cycleWriteInterval_ = 1;
+        }
+        // "phaseAlignedDirs": the defaults above (dump at every write)
+    }
 
 
     // Phase origin: explicit override or auto-align to nearest
     // cycle boundary at or before the current time.
-    if (dict.found("startTime"))
+    // phaseOrigin (deprecated: startTime). The rename matters more here
+    // than for the other entries: 'startTime' is ALSO the standard
+    // function-object scheduling entry (when execution begins), so the
+    // same word meant two different things in one dictionary.
+    if (grid.found("phaseOrigin"))
     {
+        if (dict.found("startTime"))
+        {
+            FatalErrorInFunction
+                << "both 'phaseOrigin' and its deprecated spelling "
+                << "'startTime' given; keep only 'phaseOrigin'."
+                << exit(FatalError);
+        }
+        startTime_ = grid.lookup<scalar>("phaseOrigin");
+        phaseOriginExplicit_ = true;
+    }
+    else if (dict.found("startTime"))
+    {
+        WarningInFunction
+            << "BBPA entry 'startTime' is deprecated; use 'phaseOrigin' "
+            << "for the cycle phase origin ('startTime' collides with the "
+            << "standard function-object scheduling entry)." << endl;
         startTime_ = dict.lookup<scalar>("startTime");
+        phaseOriginExplicit_ = true;
     }
     else
     {
+        phaseOriginExplicit_ = false;
         startTime_ = std::floor(time_.value() / period_) * period_;
     }
 
     binDeltaT_ = period_/nBins_;
 
-    // "bin" mode conveniences: derive the tracked bins from the solver's write
-    // times, and centre each bin's window on its label.
-    binsAtWriteTimes_ = dict.lookupOrDefault<Switch>("binsAtWriteTimes", false);
-    binCentred_ = dict.lookupOrDefault<Switch>("binCentred", false);
+    // Bin alignment: where a bin's integration window sits relative to its
+    // label. binAlignment left (default) starts the window at the label;
+    // binAlignment centred centres it there (removing the half-bin phase
+    // lag). Deprecated spelling (one release): binCentred yes/no.
+    // (binsAtWriteTimes_ itself was resolved by the phaseSelection block.)
+    binCentred_ = false;
+    if (grid.found("binAlignment"))
+    {
+        if (dict.found("binCentred"))
+        {
+            FatalErrorInFunction
+                << "both 'binAlignment' and its deprecated spelling "
+                << "'binCentred' given; keep only 'binAlignment'."
+                << exit(FatalError);
+        }
+        const word a(grid.lookup("binAlignment"));
+        if (a == "centred")
+        {
+            binCentred_ = true;
+        }
+        else if (a != "left")
+        {
+            FatalErrorInFunction
+                << "unknown binAlignment '" << a
+                << "'; valid values: left, centred."
+                << exit(FatalError);
+        }
+    }
+    else if (dict.found("binCentred"))
+    {
+        WarningInFunction
+            << "BBPA entry 'binCentred' is deprecated; use "
+            << "'binAlignment centred;' (or 'left')." << endl;
+        binCentred_ = dict.lookup<Switch>("binCentred");
+    }
 
     if (binsAtWriteTimes_)
     {
@@ -695,7 +1145,204 @@ bool Foam::functionObjects::BBPA::read(const dictionary& dict)
         }
     }
 
+    // Output selection: which ACCUMULATED bins reach disk. A subset of
+    // the accumulation selection; unlike it, freely changeable across a
+    // restart (it gates serialisation only, never a statistic).
+    outputBins_.clear();
+    if (dict.found("outputSelection"))
+    {
+        const dictionary& os = dict.subDict("outputSelection");
+
+        forAllConstIter(dictionary, os, iter)
+        {
+            const word& k = iter().keyword();
+            if (k != "mode" && k != "bins")
+            {
+                FatalErrorInFunction
+                    << "unknown outputSelection entry '" << k
+                    << "'; valid: mode, bins."
+                    << exit(FatalError);
+            }
+        }
+
+        const word mode
+        (
+            os.lookupOrDefault<word>("mode", word("allAccumulated"))
+        );
+
+        if (mode == "accumulated" || mode == "all")
+        {
+            FatalErrorInFunction
+                << "outputSelection mode '" << mode << "' was renamed "
+                << "'allAccumulated' before release (an 'all' distinct "
+                << "from the accumulated set would violate the subset "
+                << "rule)."
+                << exit(FatalError);
+        }
+
+        if (mode == "list")
+        {
+            outputBins_ = os.lookup<labelList>("bins");
+            forAll(outputBins_, k)
+            {
+                const label b = outputBins_[k];
+                if (b < 0 || b >= nBins_)
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is out of range [0," << nBins_ << ")"
+                        << exit(FatalError);
+                }
+                if
+                (
+                    !binsOfInterest_.empty()
+                 && findIndex(binsOfInterest_, b) < 0
+                )
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b << " is not in the "
+                        << "accumulation selection -- only accumulated "
+                        << "bins can be written."
+                        << exit(FatalError);
+                }
+            }
+        }
+        else if (mode != "allAccumulated")
+        {
+            FatalErrorInFunction
+                << "unknown outputSelection mode '" << mode
+                << "'; valid values: allAccumulated, list."
+                << exit(FatalError);
+        }
+    }
+
+    // Per-bin gates: accumulation (memory/statistics) and output (disk).
+    activeBinMap_ = boolList(nBins_, binsOfInterest_.empty());
+    forAll(binsOfInterest_, k)
+    {
+        activeBinMap_[binsOfInterest_[k]] = true;
+    }
+    if (outputBins_.empty())
+    {
+        outputBinMap_ = activeBinMap_;
+    }
+    else
+    {
+        outputBinMap_ = boolList(nBins_, false);
+        forAll(outputBins_, k)
+        {
+            outputBinMap_[outputBins_[k]] = true;
+        }
+
+        WarningInFunction
+            << "outputSelection is narrower than the accumulation: bins "
+            << "that are accumulated but not written have no on-disk "
+            << "checkpoint state and will COLD-START on a restart." << endl;
+    }
+
+    // Output selection: which ACCUMULATED bins reach disk. Parsed after
+    // the solverWriteTimes derivation so the subset check sees the
+    // RESOLVED accumulation set. Unlike the accumulation selection this
+    // may change across a restart (it gates serialisation only) -- but a
+    // bin accumulated and never written has no on-disk state, so it is
+    // not restart-recoverable (warned below).
+    outputBins_.clear();
+    if (dict.found("outputSelection"))
+    {
+        const dictionary& os = dict.subDict("outputSelection");
+
+        forAllConstIter(dictionary, os, iter)
+        {
+            const word& k = iter().keyword();
+            if (k != "mode" && k != "bins")
+            {
+                FatalErrorInFunction
+                    << "unknown outputSelection entry '" << k
+                    << "'; valid: mode, bins."
+                    << exit(FatalError);
+            }
+        }
+
+        const word mode
+        (
+            os.lookupOrDefault<word>("mode", word("allAccumulated"))
+        );
+
+        if (mode == "accumulated" || mode == "all")
+        {
+            FatalErrorInFunction
+                << "outputSelection mode '" << mode << "' was renamed "
+                << "'allAccumulated' before release (an 'all' distinct "
+                << "from the accumulated set would violate the subset "
+                << "rule)."
+                << exit(FatalError);
+        }
+
+        if (mode == "list")
+        {
+            outputBins_ = os.lookup<labelList>("bins");
+
+            labelHashSet accumulated(binsOfInterest_);
+            labelHashSet seen;
+            forAll(outputBins_, k)
+            {
+                const label b = outputBins_[k];
+                if (b < 0 || b >= nBins_)
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is out of range [0," << nBins_ << ")"
+                        << exit(FatalError);
+                }
+                if (!seen.insert(b))
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b
+                        << " is listed more than once."
+                        << exit(FatalError);
+                }
+                if (!binsOfInterest_.empty() && !accumulated.found(b))
+                {
+                    FatalErrorInFunction
+                        << "outputSelection bin " << b << " is not in the "
+                        << "accumulation selection -- only accumulated "
+                        << "bins can be written."
+                        << exit(FatalError);
+                }
+            }
+        }
+        else if (mode != "allAccumulated")
+        {
+            FatalErrorInFunction
+                << "unknown outputSelection mode '" << mode
+                << "'; valid values: allAccumulated, list."
+                << exit(FatalError);
+        }
+    }
+
+    // Per-bin gate maps: accumulation (memory) and output (disk)
+    activeBinMap_ = boolList(nBins_, binsOfInterest_.empty());
+    forAll(binsOfInterest_, k)
+    {
+        activeBinMap_[binsOfInterest_[k]] = true;
+    }
+
+    if (outputBins_.empty())
+    {
+        outputBinMap_ = activeBinMap_;
+    }
+    else
+    {
+        outputBinMap_ = boolList(nBins_, false);
+        forAll(outputBins_, k)
+        {
+            outputBinMap_[outputBins_[k]] = true;
+        }
+
+    }
+
     phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
+    clock_.reset(period_, nBins_, startTime_, binCentred_);
 
     Info<< type() << " " << name() << ":" << nl
         << "    Period: " << period_ << " s" << nl
@@ -744,133 +1391,232 @@ bool Foam::functionObjects::BBPA::execute()
         flagStraddledBin();
     }
 
-    const label binI = phaseBin();
+    // fieldAvailability strict: every requested field must exist before
+    // the first retained accumulation interval. Lazy (the default) lets a
+    // derived field appear later; its OWN per-bin cycle counts then cover
+    // only the cycles it observed (each field's ensemble is independent).
+    if
+    (
+        fieldAvailabilityStrict_
+     && !availabilityChecked_
+     && currentCycleNumber() >= startCycle_
+    )
+    {
+        availabilityChecked_ = true;
+        forAll(fieldNames_, i)
+        {
+            if
+            (
+                !scalarBinItems_.found(fieldNames_[i])
+             && !vectorBinItems_.found(fieldNames_[i])
+            )
+            {
+                FatalErrorInFunction
+                    << "fieldAvailability strict: field '" << fieldNames_[i]
+                    << "' is not registered at the first retained "
+                    << "accumulation interval. Ensure its producing "
+                    << "function object runs before BBPA, or use "
+                    << "fieldAvailability lazy."
+                    << exit(FatalError);
+            }
+        }
+    }
+
+    // The v2 numerical contract: split the solver step at every bin (and
+    // hence cycle) boundary it crosses, and credit each bin its exact
+    // overlap dt(n,c,j). The single field sample of the step is treated
+    // as constant over the whole interval (first-order in time), so bin
+    // WEIGHTS are exact -- sum(segments) = dt for every step and
+    // sum_j W(c,j) = period for every completed cycle -- and the bin mean
+    // is the integral of that discrete signal, not an end-time lumping.
+    const scalar tNow = time_.value();
+    const scalar dtStep = time_.deltaT().value();
+
+    clock_.split(tNow - dtStep, tNow, segs_);
+
+    const bool limited = (cycles_ > 0);
+    const label limit = startCycle_ + cycles_;
+
+    forAll(segs_, i)
+    {
+        const label segCycle = segs_[i].cycle;
+
+        // A restart's startup re-execute replays the step that ended at
+        // the checkpoint instant; its pre-checkpoint segments belong to a
+        // cycle already folded into the restored ensemble. Skip them --
+        // counting them again would double-integrate that interval.
+        if (segCycle < previousCycle_) continue;
+
+        advanceCycleTo(segCycle);
+
+        if (segCycle < startCycle_) continue;
+        if (limited && segCycle >= limit) continue;
+
+        // untracked bin: the phase clock has done its work; skip even
+        // the field lookups (no field-sized arithmetic for this segment)
+        if (!activeBinMap_[segs_[i].bin]) continue;
+
+        currentBin_ = segs_[i].bin;
+        accumulateAllFields(currentBin_, segs_[i].dt);
+        previousBin_ = currentBin_;
+    }
+
+    // A step ENDING exactly on a cycle boundary completes that cycle: the
+    // boundary instant itself classifies (snap) into the NEXT cycle, so
+    // finalise now rather than on the next step -- a write() fired at
+    // this very instant must see the completed ensemble.
     currentCycle_ = currentCycleNumber();
-
-    // Check if we should start averaging yet
-    if (currentCycle_ < startCycle_)
+    if (currentCycle_ > previousCycle_)
     {
-        return true;
+        advanceCycleTo(currentCycle_);
     }
 
-    // Check if within averaging cycle limit
-    if (cycles_ > 0 && currentCycle_ >= (startCycle_ + cycles_))
-    {
-        return true;
-    }
-
-    // Detect cycle transition
-    if (currentCycle_ != previousCycle_)
-    {
-        if (previousCycle_ >= startCycle_)
-        {
-            // The completing cycle's LAST bin closes exactly at this boundary,
-            // so it has never been flushed by a write() call inside the cycle.
-            // Persist it before resetAllBinsForNewCycle() wipes the
-            // accumulator, or its _Bin_UU would never be written at all.
-            if (binNaming_)
-            {
-                flushCurrentCycleBins(previousCycle_);
-            }
-
-            // Finalize the previous cycle (only if it was being averaged).
-            // If a restart landed mid-bin during THIS cycle, that one bin saw
-            // only part of its phase window and must not be folded in as a
-            // whole cycle -- drop it, exactly as a bin with no data is dropped.
-            const label skip =
-                (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
-
-            if (skip >= 0)
-            {
-                Info<< "    dropping restart-straddled bin " << skip
-                    << " from cycle " << previousCycle_
-                    << " (partial window)" << endl;
-            }
-
-            finalizeAllForCycle(skip);
-
-            // consumed: later cycles cover this bin fully again
-            if (skip >= 0)
-            {
-                straddledBin_ = -1;
-                straddledCycle_ = -1;
-            }
-        }
-
-        // Reset bins for new cycle
-        resetAllBinsForNewCycle();
-
-        Info<< "Starting cycle " << currentCycle_;
-        if (currentCycle_ == startCycle_)
-        {
-            Info<< " (phase averaging begins)";
-        }
-        Info<< endl;
-
-        previousCycle_ = currentCycle_;
-    }
-
-    // Update current bin tracking
-    currentBin_ = binI;
-
-    // Accumulate all fields for current time step
-    const scalar dt = time_.deltaT().value();
-    accumulateAllFields(binI, dt);
-
-    previousBin_ = currentBin_;
+    // The bin containing the CURRENT instant (companion writes use this)
+    currentBin_ = phaseBin();
 
     return true;
 }
 
 
+void Foam::functionObjects::BBPA::advanceCycleTo(const label c)
+{
+    if (c <= previousCycle_)
+    {
+        return;
+    }
+
+    const bool limited = (cycles_ > 0);
+    const label limit = startCycle_ + cycles_;
+
+    if
+    (
+        previousCycle_ >= startCycle_
+     && (!limited || previousCycle_ < limit)
+    )
+    {
+        // The completing cycle's LAST bin closes exactly at this boundary,
+        // so it has never been flushed by a write() call inside the cycle.
+        // Persist it before resetAllBinsForNewCycle() wipes the
+        // accumulator, or its _Bin_UU would never be written at all.
+        flushCurrentCycleBins(previousCycle_);
+
+        // Finalize the previous cycle (only if it was being averaged).
+        // If a restart landed mid-bin during THIS cycle, that one bin saw
+        // only part of its phase window and must not be folded in as a
+        // whole cycle -- drop it, exactly as a bin with no data is dropped.
+        const label skip =
+            (previousCycle_ == straddledCycle_) ? straddledBin_ : -1;
+
+        if (skip >= 0)
+        {
+            Info<< "    dropping restart-straddled bin " << skip
+                << " from cycle " << previousCycle_
+                << " (partial window)" << endl;
+        }
+
+        finalizeAllForCycle(skip);
+
+        // consumed: later cycles cover this bin fully again
+        if (skip >= 0)
+        {
+            straddledBin_ = -1;
+            straddledCycle_ = -1;
+        }
+
+        resetAllBinsForNewCycle();
+
+        if (limited && c >= limit)
+        {
+            // The final averaged cycle has just been folded in; nothing
+            // accumulates beyond this point.
+            Info<< "Cycle limit reached: " << cycles_
+                << " cycles averaged; accumulation stopped" << endl;
+        }
+        else
+        {
+            Info<< "Starting cycle " << c;
+            if (c == startCycle_)
+            {
+                Info<< " (phase averaging begins)";
+            }
+            Info<< endl;
+        }
+    }
+    else if (!(limited && previousCycle_ >= limit))
+    {
+        // Pre-averaging cycles (before discardCycles is reached): nothing
+        // to finalise, but the integrators still reset at the boundary.
+        resetAllBinsForNewCycle();
+
+        Info<< "Starting cycle " << c;
+        if (c == startCycle_)
+        {
+            Info<< " (phase averaging begins)";
+        }
+        Info<< endl;
+    }
+
+    previousCycle_ = c;
+}
+
+
 bool Foam::functionObjects::BBPA::write()
 {
-    Info<< type() << " " << name() << " write (mode="
-        << writeMode_ << "):" << nl;
+    Info<< type() << " " << name() << " write (layout="
+        << layout_ << "):" << nl;
 
     const bool isLastWrite =
         (time_.value() + 0.5*time_.deltaT().value() >= time_.endTime().value());
 
-    // "bin" mode: persist the CURRENT cycle's newly-closed bins before
-    // anything else. This is what makes the output restart-safe at write
-    // granularity: a kill then loses only the bin it lands in, instead of the
-    // entire in-progress cycle (measured: 15 of 25 bins lost to a SIGKILL
-    // before this, 1 after).
-    if (binNaming_)
+    // Persist the CURRENT cycle's newly-closed bins for every field with
+    // the per-cycle capture (no-op for the rest). This is what makes the
+    // output restart-safe at write granularity: a kill then loses only the
+    // bin it lands in, instead of the entire in-progress cycle (measured:
+    // 15 of 25 bins lost to a SIGKILL before this, 1 after).
+    flushCurrentCycleBins(currentCycle_);
+
+    if (layout_ == "companion" || layout_ == "both")
     {
-        flushCurrentCycleBins(currentCycle_);
+        writeCompanionAllFields();
     }
 
-    if (writeMode_ == "companion")
+    if (layout_ != "companion")
     {
-        writeCompanionAllFields();
-    }
-    else if (writeMode_ == "both")
-    {
-        writeCompanionAllFields();
-        if (isLastWrite)
+        // Phase-aligned dump cadence: 0 = every write() call; N > 0 = once
+        // per N completed cycles (the first write after every Nth cycle
+        // boundary; cuts the bin-output I/O by ~period/writeInterval while
+        // staying a full, restart-safe checkpoint); -1 = never on cadence
+        // (legacy "both"). writeFinal_ forces the last write regardless.
+        // lastFullWriteCycle_ starts at -1 and is not persisted, so the
+        // first write after any (re)start re-establishes the checkpoint.
+        bool due = false;
+        if (cycleWriteInterval_ == 0)
         {
-            writeAllAveragedFields(true);
+            due = true;
         }
-    }
-    else if (writeMode_ == "bin" || writeMode_ == "perCycle")
-    {
-        // Full phase-aligned dump, but only once per completed cycle (the
-        // first write after a cycle boundary) instead of every solver write.
-        // Cuts the bin-output I/O by ~period/writeInterval while staying a
-        // full, restart-safe checkpoint at each cycle (restart granularity =
-        // one cycle). lastFullWriteCycle_ starts at -1 and is not persisted,
-        // so the first write after any (re)start re-establishes the checkpoint.
-        if (currentCycle_ > lastFullWriteCycle_)
+        else if
+        (
+            cycleWriteInterval_ > 0
+         && currentCycle_ > lastFullWriteCycle_
+         && (currentCycle_ % cycleWriteInterval_) == 0
+        )
         {
-            // "bin" mode: the per-cycle _Bin file is written every cycle,
-            // but the cross-cycle _BinPA* only every PAwriteInterval cycles
-            // (or, when PAwriteInterval <= 0, on the final write only).
-            // The completed-cycle count is currentCycle_ (cycle currentCycle_-1
-            // has just been folded in).
+            due = true;
+        }
+        if (writeFinal_ && isLastWrite)
+        {
+            due = true;
+        }
+
+        if (due)
+        {
+            // The cross-cycle _PA* files can be written less often than
+            // the per-cycle _Bin: every meanWriteIntervalCycles completed
+            // cycles, or (<= 0) at the final write only. The
+            // completed-cycle count is currentCycle_ (cycle
+            // currentCycle_-1 has just been folded in).
             const bool emitPA =
-                !binNaming_
-             || (paWriteInterval_ <= 0
+                (paWriteInterval_ <= 0
                     ? isLastWrite
                     : (currentCycle_ % paWriteInterval_) == 0)
              || isLastWrite;
@@ -879,16 +1625,13 @@ bool Foam::functionObjects::BBPA::write()
             lastFullWriteCycle_ = currentCycle_;
         }
     }
-    else
-    {
-        // default: "phaseAlignedDirs" (Strategy B, back-compat)
-        writeAllAveragedFields(true);
-    }
 
     // Checkpoint: save scalar counters so the run can be restarted.
-    // The meanFields_ and M2Fields_ are written by AUTO_WRITE; this
+    // (Suppressed entirely by output.writeProperties off.)
+    // The stats_.mean_ and stats_.M2_ are written by AUTO_WRITE; this
     // dict saves the counters that cannot be reconstructed from the
     // fields alone.
+    if (writeProperties_)
     {
         timeIOdictionary propsDict
         (
@@ -904,11 +1647,27 @@ bool Foam::functionObjects::BBPA::write()
             )
         );
 
+        // Configuration signature (v2 step 8): everything that fixes the
+        // accumulators' shape and meaning. validateCheckpoint() compares
+        // this against the dictionary on restart and aborts on any change
+        // that would silently corrupt or misinterpret the restored state.
+        propsDict.add("formatVersion", 2);
+        propsDict.add("period", period_);
+        propsDict.add("nBins", nBins_);
+        propsDict.add
+        (
+            "binAlignment", word(binCentred_ ? "centred" : "left")
+        );
+        propsDict.add("selectedBins", binsOfInterest_);
+        propsDict.add("timeQuadrature", timeQuadrature_);
+
         propsDict.add("startTime", startTime_);
         propsDict.add("currentCycle", currentCycle_);
         propsDict.add("previousCycle", previousCycle_);
+        propsDict.add("currentBin", currentBin_);
 
-        // Per-field counters
+        // Per-field counters + per-field signature (type, products, the
+        // in-progress cycle's bin weights and whether one is present)
         forAllConstIter
         (
             HashTable<autoPtr<binItem<scalar>>>,
@@ -917,8 +1676,31 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
+            fieldDict.add("type", word("scalar"));
+            fieldDict.add("nCycles", iter()->stats_.nCycles_);
+            fieldDict.add("binCounts", iter()->stats_.binCounts_);
+            fieldDict.add
+            (
+                "writePhaseMean", Switch(iter()->products_.writeMean)
+            );
+            fieldDict.add
+            (
+                "secondMoment", Switch(iter()->products_.secondMoment)
+            );
+            fieldDict.add
+            (
+                "crossCycleVariance",
+                Switch(iter()->products_.crossCycleVariance)
+            );
+            fieldDict.add
+            (
+                "writePerCycle", Switch(iter()->products_.writePerCycle)
+            );
+            fieldDict.add("binWeights", iter()->integ_.binTime_);
+            fieldDict.add
+            (
+                "partialCycle", Switch(sum(iter()->integ_.binTime_) > 0)
+            );
             propsDict.add(iter.key(), fieldDict);
         }
         forAllConstIter
@@ -929,14 +1711,252 @@ bool Foam::functionObjects::BBPA::write()
         )
         {
             dictionary fieldDict;
-            fieldDict.add("nCycles", iter()->nCycles_);
-            fieldDict.add("binCounts", iter()->binCounts_);
+            fieldDict.add("type", word("vector"));
+            fieldDict.add("nCycles", iter()->stats_.nCycles_);
+            fieldDict.add("binCounts", iter()->stats_.binCounts_);
+            fieldDict.add
+            (
+                "writePhaseMean", Switch(iter()->products_.writeMean)
+            );
+            fieldDict.add
+            (
+                "secondMoment", Switch(iter()->products_.secondMoment)
+            );
+            fieldDict.add
+            (
+                "crossCycleVariance",
+                Switch(iter()->products_.crossCycleVariance)
+            );
+            fieldDict.add
+            (
+                "writePerCycle", Switch(iter()->products_.writePerCycle)
+            );
+            fieldDict.add("binWeights", iter()->integ_.binTime_);
+            fieldDict.add
+            (
+                "partialCycle", Switch(sum(iter()->integ_.binTime_) > 0)
+            );
             propsDict.add(iter.key(), fieldDict);
         }
         propsDict.regIOobject::write();
     }
 
     return true;
+}
+
+
+void Foam::functionObjects::BBPA::validateCheckpoint
+(
+    const dictionary& propsDict
+) const
+{
+    const label fmt = propsDict.lookupOrDefault<label>("formatVersion", 1);
+
+    if (fmt > 2)
+    {
+        FatalErrorInFunction
+            << "checkpoint formatVersion " << fmt << " is newer than this "
+            << "build understands (2). Restart with a matching build, or "
+            << "cold-start by removing the checkpoint."
+            << exit(FatalError);
+    }
+
+    if (fmt < 2)
+    {
+        WarningInFunction
+            << "checkpoint carries no configuration signature (written by "
+            << "an older build); strict restart validation skipped for "
+            << "this restart. The next checkpoint will carry one." << endl;
+        return;
+    }
+
+    // ---- accumulator-shape entries: any change aborts --------------------
+
+    const scalar ckPeriod = propsDict.lookup<scalar>("period");
+    if (mag(ckPeriod - period_) > 1e-9*mag(ckPeriod))
+    {
+        FatalErrorInFunction
+            << "'period' changed across the restart: checkpoint has "
+            << ckPeriod << ", dictionary has " << period_ << ". The bins "
+            << "of the restored state mean different phases. Keep the "
+            << "period, or cold-start."
+            << exit(FatalError);
+    }
+
+    const label ckNBins = propsDict.lookup<label>("nBins");
+    if (ckNBins != nBins_)
+    {
+        FatalErrorInFunction
+            << "'nBins' changed across the restart: checkpoint has "
+            << ckNBins << ", dictionary has " << nBins_ << ". The restored "
+            << "accumulators have the checkpoint's shape. Keep nBins, or "
+            << "cold-start."
+            << exit(FatalError);
+    }
+
+    const word ckAlign(propsDict.lookup("binAlignment"));
+    const word nowAlign(binCentred_ ? "centred" : "left");
+    if (ckAlign != nowAlign)
+    {
+        FatalErrorInFunction
+            << "'binAlignment' changed across the restart: checkpoint has "
+            << ckAlign << ", dictionary has " << nowAlign << ". Every "
+            << "restored bin would shift half a bin in phase. Keep the "
+            << "alignment, or cold-start."
+            << exit(FatalError);
+    }
+
+    labelList ckBins(propsDict.lookup("selectedBins"));
+    if (ckBins != binsOfInterest_)
+    {
+        FatalErrorInFunction
+            << "the phase selection changed across the restart: checkpoint "
+            << "tracked bins " << ckBins << ", dictionary selects "
+            << binsOfInterest_ << " (empty = all). The restored state has "
+            << "no data for newly selected bins. Keep the selection, or "
+            << "cold-start."
+            << exit(FatalError);
+    }
+
+    const word ckQuad
+    (
+        propsDict.lookupOrDefault<word>("timeQuadrature", word("endPoint"))
+    );
+    if (ckQuad != timeQuadrature_)
+    {
+        FatalErrorInFunction
+            << "'timeQuadrature' changed across the restart: checkpoint "
+            << "has " << ckQuad << ", dictionary has " << timeQuadrature_
+            << ". The quadrature rule is part of the numerical meaning of "
+            << "the accumulated state."
+            << exit(FatalError);
+    }
+
+    if (phaseOriginExplicit_)
+    {
+        const scalar ckOrigin = propsDict.lookup<scalar>("startTime");
+        if (mag(ckOrigin - startTime_) > 1e-9*max(scalar(1), mag(ckOrigin)))
+        {
+            FatalErrorInFunction
+                << "the explicit phase origin changed across the restart: "
+                << "checkpoint has " << ckOrigin << ", dictionary gives "
+                << startTime_ << ". Every restored bin would be relabelled "
+                << "to a different phase. Keep the origin (or omit it to "
+                << "adopt the checkpoint's), or cold-start."
+                << exit(FatalError);
+        }
+    }
+
+    // ---- fields: removal aborts; per-field product expansion aborts ------
+
+    forAllConstIter(dictionary, propsDict, iter)
+    {
+        if (!iter().isDict()) continue;
+        const word& fname = iter().keyword();
+        if (findIndex(fieldNames_, fname) < 0)
+        {
+            FatalErrorInFunction
+                << "field '" << fname << "' has checkpoint state but is no "
+                << "longer in the 'fields' list. Removing a field discards "
+                << "its accumulated cycles. Keep the field, or cold-start."
+                << exit(FatalError);
+        }
+    }
+
+    forAll(fieldNames_, i)
+    {
+        const word& fname = fieldNames_[i];
+        if (!propsDict.found(fname))
+        {
+            // A field that never registered before the checkpoint (e.g. a
+            // derived field the producing FO had not created yet) has no
+            // state; it cold-starts, which loses nothing it ever had.
+            WarningInFunction
+                << "field '" << fname << "' has no checkpoint state and "
+                << "will cold-start." << endl;
+            continue;
+        }
+        const dictionary& fd = propsDict.subDict(fname);
+        const binProducts now = resolveProducts(fname);
+
+        // type must not change (checked when the item already exists)
+        const word ckType(fd.lookupOrDefault<word>("type", word::null));
+        word nowType(word::null);
+        if (scalarBinItems_.found(fname)) nowType = "scalar";
+        else if (vectorBinItems_.found(fname)) nowType = "vector";
+        if
+        (
+            ckType != word::null && nowType != word::null
+         && ckType != nowType
+        )
+        {
+            FatalErrorInFunction
+                << "field '" << fname << "' changed type across the "
+                << "restart: checkpoint has " << ckType << ", the registry "
+                << "now has " << nowType << "."
+                << exit(FatalError);
+        }
+
+        // products: ON where the checkpoint had OFF means state that was
+        // never accumulated -- abort. OFF where it had ON only discards.
+        const struct { const char* name; bool ck; bool cur; } prods[] =
+        {
+            {
+                "writePhaseMean",
+                fd.lookupOrDefault<Switch>("writePhaseMean", true),
+                now.writeMean
+            },
+            {
+                "secondMoment",
+                fd.lookupOrDefault<Switch>("secondMoment", true),
+                now.secondMoment
+            },
+            {
+                "crossCycleVariance",
+                fd.lookupOrDefault<Switch>("crossCycleVariance", true),
+                now.crossCycleVariance
+            },
+            {
+                "writePerCycle",
+                fd.lookupOrDefault<Switch>("writePerCycle", true),
+                now.writePerCycle
+            }
+        };
+
+        for (const auto& p : prods)
+        {
+            if (p.cur && !p.ck)
+            {
+                // writePerCycle is the one product with NO cumulative
+                // history: _Bin files cover only the cycle in progress, so
+                // enabling it across a restart merely starts protecting
+                // future bin closes. Restore finds no _Bin files once and
+                // recovers nothing; nothing is misinterpreted.
+                if (word(p.name) == "writePerCycle")
+                {
+                    WarningInFunction
+                        << "field '" << fname << "': product 'writePerCycle' "
+                        << "turned ON across the restart; per-cycle flushes "
+                        << "begin with the current cycle (it has no "
+                        << "cumulative history to reconstruct)." << endl;
+                    continue;
+                }
+                FatalErrorInFunction
+                    << "field '" << fname << "': product '" << p.name
+                    << "' turned ON across the restart, but the checkpoint "
+                    << "never accumulated it -- its history cannot be "
+                    << "reconstructed. Keep it off, or cold-start."
+                    << exit(FatalError);
+            }
+            if (!p.cur && p.ck)
+            {
+                WarningInFunction
+                    << "field '" << fname << "': product '" << p.name
+                    << "' turned off across the restart; its accumulated "
+                    << "state is discarded." << endl;
+            }
+        }
+    }
 }
 
 
@@ -1011,6 +2031,14 @@ void Foam::functionObjects::BBPA::readCheckpoint()
     }
     dictionary propsDict(propsFile);
 
+    // Strict restart-metadata validation (v2 step 8): abort before any
+    // state is restored if the configuration no longer matches the
+    // checkpoint's signature. Once per restart.
+    if (!countersRestored_)
+    {
+        validateCheckpoint(propsDict);
+    }
+
     // Scalar counters.  Phase origin always taken from the checkpoint:
     // a manual dict override after a restart would desynchronise the
     // accumulator state (which was indexed against the saved
@@ -1028,6 +2056,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // from the RESTART time, silently un-centring every bin after a restart
         // while the labels stayed put.
         phaseOrigin_ = binCentred_ ? startTime_ - 0.5*binDeltaT_ : startTime_;
+        clock_.reset(period_, nBins_, startTime_, binCentred_);
 
         // Straddled-bin guard. The run resumes at the last WRITTEN time, which
         // need not be a bin boundary. The bin containing that instant will now
@@ -1048,7 +2077,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // wrote, not from an already-advanced cycle.  Must mirror
         // writeAllAveragedFields(): the bins live in the window of the cycle
         // they describe (currentCycle_-1), which is at/behind the solver clock.
-        checkpointCycleStart_ = startTime_ + max(currentCycle_ - 1, 0) * period_;
+        checkpointCycleStart_ = clock_.cycleStart(max(currentCycle_ - 1, 0));
 
         // Backward compatibility: checkpoints written before this fix stamped
         // the bins one cycle LATER (currentCycle_*period_). If the current
@@ -1056,7 +2085,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // back to it so an in-flight run restarts against its own history
         // instead of silently cold-starting.
         {
-            const scalar legacyStart = startTime_ + currentCycle_ * period_;
+            const scalar legacyStart = clock_.cycleStart(currentCycle_);
             const word probe = fieldNames_.size() ? fieldNames_[0] : word::null;
             if (probe != word::null && !legacyStart_probed_)
             {
@@ -1088,22 +2117,22 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         // it happens to register, and not skipped entirely (the bug: the
         // recovery used to run once here, for U only, so WSS lost a whole cycle
         // on every bin whose window had closed before the restart).
-        inProgressCycleStart_ = startTime_ + currentCycle_*period_;
+        inProgressCycleStart_ = clock_.cycleStart(currentCycle_);
         inProgressNow_ = time_.value();
         inProgressCaptured_ = true;
     }
 
-    // Reconstruct meanFields_, M2Fields_ and meanSqrFields_ from the
+    // Reconstruct stats_.mean_, stats_.M2_ and stats_.meanSqr_ from the
     // phase-aligned _PA / _PAVariance / _PA_UU files.  At the most
     // recent writeTime (just after cycle finalisation), the public
     // bin fields satisfy:
     //
     //     <name>_PA[binI]         at t = cycleStart + binI*binDeltaT
-    //                              = meanFields_[binI]
+    //                              = stats_.mean_[binI]
     //     <name>_PAVariance[binI] at the same t
-    //                              = M2Fields_[binI] / (nCycles - 1)
+    //                              = stats_.M2_[binI] / (nCycles - 1)
     //     <name>_PA_UU[binI]      at the same t
-    //                              = meanSqrFields_[binI]
+    //                              = stats_.meanSqr_[binI]
     //
     // Restore by reading from the appropriate phase-aligned dirs.  Uses the
     // checkpoint's own cycle start (captured above), so this is correct both
@@ -1128,7 +2157,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         {
             const dictionary& fd = propsDict.subDict(fname);
             // Guard against a checkpoint from a run with a DIFFERENT nBins.
-            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // stats_.binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
             // to the checkpoint's size, after which every downstream loop over
             // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
             // free(): invalid pointer crash. Reject a mismatched checkpoint and
@@ -1148,11 +2177,11 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 restoredFields_.insert(fname);
                 continue;
             }
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = loadedCounts;
-            restoreBinItemFromDisk
+            iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
+            iter()->stats_.binCounts_ = loadedCounts;
+            state::restoreStatistics
             (
-                *(iter()), fname, cycleStart,
+                *(iter()), fname, cycleStart, binDeltaT_,
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
 
@@ -1161,12 +2190,13 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             // by restoredFields_, so it runs exactly once per field -- including
             // a late-registering derived field -- and never re-clobbers a field
             // that has already accumulated new steps since the restart.
-            if (binNaming_ && inProgressCaptured_)
+            // per-item: no-op for fields without the per-cycle capture
+            if (inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
-                const label nrec = iter()->restoreCurrentCycleBins
-                (
-                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                const label nrec = state::restoreClosedBins
+        (
+                    *iter(), mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
                 );
                 if (nrec > 0)
                 {
@@ -1178,7 +2208,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
 
             Info<< "    Restored field " << fname
-                << ": nCycles=" << iter()->nCycles_ << endl;
+                << ": nCycles=" << iter()->stats_.nCycles_ << endl;
         }
         // Field absent from the checkpoint (not tracked in the previous
         // run): a cold start is correct for it. Mark it done so we do not
@@ -1199,7 +2229,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
         {
             const dictionary& fd = propsDict.subDict(fname);
             // Guard against a checkpoint from a run with a DIFFERENT nBins.
-            // binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
+            // stats_.binCounts_ is sized nBins_; scalarField::operator= would RESIZE it
             // to the checkpoint's size, after which every downstream loop over
             // nBins_ bins indexes it OUT OF BOUNDS -> garbage counts and a
             // free(): invalid pointer crash. Reject a mismatched checkpoint and
@@ -1219,11 +2249,11 @@ void Foam::functionObjects::BBPA::readCheckpoint()
                 restoredFields_.insert(fname);
                 continue;
             }
-            iter()->nCycles_ = fd.lookup<label>("nCycles");
-            iter()->binCounts_ = loadedCounts;
-            restoreBinItemFromDisk
+            iter()->stats_.nCycles_ = fd.lookup<label>("nCycles");
+            iter()->stats_.binCounts_ = loadedCounts;
+            state::restoreStatistics
             (
-                *(iter()), fname, cycleStart,
+                *(iter()), fname, cycleStart, binDeltaT_,
                 binNaming_ ? word("_BinPA") : word("_PA")
             );
 
@@ -1232,12 +2262,13 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             // by restoredFields_, so it runs exactly once per field -- including
             // a late-registering derived field -- and never re-clobbers a field
             // that has already accumulated new steps since the restart.
-            if (binNaming_ && inProgressCaptured_)
+            // per-item: no-op for fields without the per-cycle capture
+            if (inProgressCaptured_)
             {
                 const scalar cOff = binCentred_ ? 0.5*binDeltaT_ : 0.0;
-                const label nrec = iter()->restoreCurrentCycleBins
-                (
-                    mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
+                const label nrec = state::restoreClosedBins
+        (
+                    *iter(), mesh_, inProgressCycleStart_, binDeltaT_, inProgressNow_, cOff
                 );
                 if (nrec > 0)
                 {
@@ -1249,7 +2280,7 @@ void Foam::functionObjects::BBPA::readCheckpoint()
             }
 
             Info<< "    Restored field " << fname
-                << ": nCycles=" << iter()->nCycles_ << endl;
+                << ": nCycles=" << iter()->stats_.nCycles_ << endl;
         }
         restoredFields_.insert(fname);
     }

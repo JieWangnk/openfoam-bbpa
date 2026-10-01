@@ -42,6 +42,8 @@ Description
 #define BBPA_H
 
 #include "fvMeshFunctionObject.H"
+#include "phaseClock.H"
+#include "binAccumulators.H"
 #include "volFieldsFwd.H"
 #include "HashPtrTable.H"
 #include "HashSet.H"
@@ -57,15 +59,9 @@ namespace Foam
 namespace functionObjects
 {
 
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-//  Trait: type of phi*phi for the second-moment accumulator.
-//    scalar     -> scalar      (<p*p>)
-//    vector     -> symmTensor  (<U*U> = 6-component Reynolds stress tensor)
-//    symmTensor -> symmTensor
-//    tensor     -> tensor
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-template<class T> struct bbpaSqrTypeOf { typedef T type; };
-template<> struct bbpaSqrTypeOf<vector> { typedef symmTensor type; };
+// bbpaSqrTypeOf (the phi*phi trait) and the two data components of a binItem
+// -- binIntegrator (current cycle) and cycleStatistics (cross-cycle ensemble)
+// -- live in binAccumulators.H (v2 separation of calculation concerns).
 
 
 /*---------------------------------------------------------------------------*\
@@ -80,6 +76,14 @@ class BBPA
 
         //- Fields to average
         wordList fieldNames_;
+
+        //- Per-field product options (v2): the optional dictionary after
+        //  each entry in
+        //      fields ( U { secondMoment off; } p );
+        //  keyed by field name; a missing/empty dictionary keeps every
+        //  product at its default. Resolved to a binProducts when the
+        //  field's binItem is created.
+        HashTable<dictionary> fieldOptions_;
 
         //- Period of oscillation
         scalar period_;
@@ -99,6 +103,37 @@ class BBPA
         //   systole, post-peak deceleration) are needed at large I.
         labelList binsOfInterest_;
 
+        //- Which ACCUMULATED bins reach disk as PRODUCTS (outputSelection;
+        //  empty = all accumulated bins). Must be a subset of the
+        //  accumulation selection; unlike it, this may change across a
+        //  restart -- it gates user-facing serialisation only. Every
+        //  accumulated bin's ensemble state is checkpointed regardless
+        //  (the *State spellings), so restart continuity is independent
+        //  of the output selection.
+        labelList outputBins_;
+
+        //- Per-bin accumulation gate (true = this bin exists in memory);
+        //  lets execute() skip even the field lookups for segments whose
+        //  bin is not tracked
+        boolList activeBinMap_;
+
+        //- Per-bin output gate for the writer (true = may be written)
+        boolList outputBinMap_;
+
+        //- The time-quadrature rule (part of the numerical contract and
+        //  the checkpoint signature). This build implements "endPoint":
+        //  the step's single sample is constant over its interval.
+        word timeQuadrature_;
+
+        //- fieldAvailability strict: every requested field must be
+        //  registered before the first retained accumulation interval
+        //  (publication runs); lazy (default) admits late-registering
+        //  derived fields, each keeping its own independent cycle counts.
+        bool fieldAvailabilityStrict_;
+
+        //- One-shot flag for the strict availability check
+        bool availabilityChecked_;
+
         //- Number of cycles to average (-1 for all)
         label cycles_;
 
@@ -107,6 +142,12 @@ class BBPA
 
         //- Start time for phase averaging
         scalar startTime_;
+
+        //- Was the phase origin given explicitly (phaseOrigin/startTime
+        //  entry) rather than auto-derived? An explicit origin that
+        //  contradicts the checkpoint's is a restart-metadata abort; an
+        //  auto-derived one adopts the checkpoint's silently.
+        bool phaseOriginExplicit_;
 
         //- Time step size for bins
         scalar binDeltaT_;
@@ -132,6 +173,28 @@ class BBPA
         //     value -- alongside the cross-cycle <field>_BinPA. See
         //     binNaming_ below for why the extra file matters.
         word writeMode_;
+
+        //- v2 output{}: WHERE files go. "phaseAligned" (the bins' own
+        //  time dirs), "companion" (the current bin beside the solver's
+        //  fields), or "both". The per-cycle _Bin capture is NOT a layout
+        //  -- it is the per-field writePerCycle product. Legacy writeMode
+        //  words translate onto layout_ + cycleWriteInterval_ +
+        //  writeFinal_.
+        word layout_;
+
+        //- Phase-aligned dump cadence, in completed cycles:
+        //  0 = at every write() call (the legacy phaseAlignedDirs
+        //  behaviour, and the default when no output{} is given);
+        //  N > 0 = once per N completed cycles; -1 = never on cadence
+        //  (legacy "both": final dump only).
+        label cycleWriteInterval_;
+
+        //- Force a full phase-aligned dump at the final write
+        bool writeFinal_;
+
+        //- Write the restart checkpoint (Properties dict + state files).
+        //  Off = the run cannot be restarted; warned at read.
+        bool writeProperties_;
 
         //- "bin" mode: use the <field>_Bin / _BinPA / _BinPA_UU /
         //  _BinPAVariance naming instead of <field>_PA / _PA_UU /
@@ -193,6 +256,17 @@ class BBPA
         //  startTime_. Kept separate so bin LABELS (which use startTime_)
         //  remain on the write times.
         scalar phaseOrigin_;
+
+        //- The phase/cycle/bin boundary arithmetic, configured from the
+        //  members above wherever phaseOrigin_ is (re)computed. Every
+        //  WHICH-bin/WHICH-cycle decision goes through this one object --
+        //  see phaseClock.H for why (four copies of this logic once drifted
+        //  apart).
+        phaseClock clock_;
+
+        //- Scratch list for the overlap segments of the current solver
+        //  step (reused every execute() to avoid per-step allocation)
+        DynamicList<phaseClock::segment> segs_;
 
         //- "bin" mode: write the cross-cycle _BinPA* files only every Nth
         //  completed cycle. The per-cycle _Bin file is always written (it is
@@ -306,46 +380,36 @@ class BBPA
         template<class Type>
         struct binItem
         {
-            typedef GeometricField<Type, fvPatchField, volMesh> FieldType;
+            // OF14: GeometricField template params reordered
+            // <Type, PatchField, GeoMesh> -> <Type, GeoMesh, PrimitiveField>.
+            // VolField<Type> (volFieldsFwd.H) == GeometricField<Type, fvMesh, Field>.
+            typedef VolField<Type> FieldType;
             typedef typename bbpaSqrTypeOf<Type>::type SqrType;
-            typedef GeometricField<SqrType, fvPatchField, volMesh> SqrFieldType;
+            typedef VolField<SqrType> SqrFieldType;
 
             word fieldName_;
-            label nCycles_;
-            scalarField binCounts_;
 
-            //- Phase-averaged mean fields (one per bin, preserves full type)
-            PtrList<FieldType> meanFields_;
+            //- CURRENT cycle's time-weighted accumulation (weights, first
+            //  and second moments per bin). execute() writes here; reset at
+            //  every cycle boundary. See binAccumulators.H.
+            binIntegrator<Type> integ_;
 
-            //- Welford M2 accumulator: sum of squared deviations from
-            //  running mean (numerically stable variance)
-            PtrList<volScalarField> M2Fields_;
-
-            //- Current cycle: total time accumulated in each bin
-            scalarField currentCycleBinTime_;
-
-            //- Current cycle: time-weighted sum for each bin
-            PtrList<FieldType> currentCycleBinSum_;
-
-            //- Cross-cycle running mean of <phi*phi> per bin. For a vector
-            //  field this is the full 6-component <U_i U_j> tensor; the
-            //  Reynolds stress follows as <U_i U_j> - <U_i><U_j> and TKE
-            //  as 0.5 * trace of that. For a scalar it reduces to <p*p>.
-            PtrList<SqrFieldType> meanSqrFields_;
-
-            //- Current cycle: time-weighted sum of (phi*phi) for each bin
-            PtrList<SqrFieldType> currentCycleBinSqrSum_;
+            //- CROSS-CYCLE ensemble over completed cycles (counts, running
+            //  mean, Welford M2, mean second moment <phi*phi> from which
+            //  Reynolds stress and TKE are recovered offline). Written only
+            //  by the finalizeCycle() fold. See binAccumulators.H.
+            cycleStatistics<Type> stats_;
 
             //- "bin" mode only (empty otherwise): the bin mean of the cycle
             //  that JUST completed, captured by finalizeCycle() before the
             //  accumulators are reset.
             //
             //  It has to be captured rather than read from
-            //  currentCycleBinSum_ at write time, because execute() runs
+            //  integ_.binSum_ at write time, because execute() runs
             //  finalizeAllForCycle() and then resetAllBinsForNewCycle() on the
             //  cycle transition, and only afterwards does the framework call
-            //  write(). By then currentCycleBinTime_ is zero and the completed
-            //  cycle's bin is gone -- folded into meanFields_ and unrecoverable
+            //  write(). By then integ_.binTime_ is zero and the completed
+            //  cycle's bin is gone -- folded into stats_.mean_ and unrecoverable
             //  from it.
             PtrList<FieldType> lastCycleFields_;
 
@@ -369,20 +433,28 @@ class BBPA
             //  written as the bin closes instead of all at once afterwards.
             boolList binFlushed_;
 
+            //- Which products this field carries (v2 per-field controls).
+            //  Off calculation products never allocate their accumulators,
+            //  so the PtrList::set() guards gate them everywhere downstream;
+            //  products_.writeMean gates only the _PA file in the writer
+            //  (the mean itself always accumulates).
+            binProducts products_;
+
             //- Construct. activeBins lists the bin indices that should
             //  allocate field-sized accumulators; an EMPTY list means
             //  "all nBins bins" (original behaviour). Non-active bins
             //  are left as null entries in the PtrLists and are skipped
             //  by accumulate()/finalizeCycle()/write().
-            //  keepLastCycle allocates lastCycleFields_ ("bin" mode). It is
-            //  opt-in because it costs one extra field per active bin.
+            //  prods selects the products: off ones are never allocated
+            //  (writePerCycle allocates lastCycleFields_, one extra field
+            //  per active bin).
             binItem
             (
                 const word& name,
                 const fvMesh& mesh,
                 const label nBins,
                 const labelList& activeBins,
-                const bool keepLastCycle = false
+                const binProducts& prods
             );
 
             void resetCurrentCycle();
@@ -398,6 +470,16 @@ class BBPA
             //  partially covered and must not be weighted as a whole cycle.
             void finalizeCycle(const label skipBin = -1);
 
+        };
+
+
+        //- The output-layout concern (v2 separation): file names,
+        //  directories, and what is written when. Reads a binItem's
+        //  components; never computes or mutates a statistic
+        //  (flushClosedBins only marks bins as flushed). Definitions in
+        //  BBPAWriterTemplates.C.
+        struct writer
+        {
             //- Write the phase-aligned bin outputs.
             //  paSuffix selects the naming: "_PA" (default/back-compat) or
             //  "_BinPA" ("bin" mode). emitBin additionally writes
@@ -405,8 +487,11 @@ class BBPA
             //  different quantity from the cross-cycle mean and must never
             //  be blended into it. emitPA gates the cross-cycle files so
             //  they can be written less often than the per-cycle _Bin.
-            void write
+            template<class Type>
+            static void phaseAligned
             (
+                const binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const label nBins,
                 const label currentCycle,
@@ -416,17 +501,20 @@ class BBPA
                 const word& paSuffix,
                 const bool emitBin,
                 const bool emitPA
-            ) const;
+            );
 
             //- Companion write: dump only the current-phase bin's PA
             //  field into the solver's current time directory (no
             //  phase-aligned sub-directories). Paired with an
             //  instantaneous snapshot in the same time dir.
-            void writeCompanion
+            template<class Type>
+            static void companion
             (
+                const binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const label currentBinIndex
-            ) const;
+            );
 
             //- "bin" mode: flush every bin of the CURRENT cycle whose phase
             //  window has closed at or before 'now' and that has not been
@@ -434,7 +522,7 @@ class BBPA
             //  phase-aligned directory.
             //
             //  Both files are needed, not just the mean: the restore
-            //  reconstructs currentCycleBinSum_ AND currentCycleBinSqrSum_ from
+            //  reconstructs integ_.binSum_ AND integ_.binSqrSum_ from
             //  them. Restoring the mean alone would leave the second-moment
             //  accumulator at zero while its bin time said "full", and
             //  finalizeCycle() would then fold a genuine zero into <UiUj> --
@@ -451,8 +539,11 @@ class BBPA
             //  centreOffset (0 or binDeltaT/2) shifts the window-closed test
             //  to the CENTRED window end when binCentred is active, so a bin
             //  whose centred window closes at 'now' is treated as complete.
-            void writeCurrentCycleBins
+            template<class Type>
+            static void flushClosedBins
             (
+                binItem<Type>& bi,
+                const boolList& writeBins,
                 const Time& time,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,
@@ -460,18 +551,44 @@ class BBPA
                 const label skipBin,
                 const scalar centreOffset
             );
+        };
 
-            //- "bin" mode: restore the in-progress cycle's completed bins from
-            //  the <field>_Bin / <field>_Bin_UU written before a kill, so a
-            //  restart resumes mid-cycle instead of discarding it.
-            //  Returns the number of bins recovered.
-            label restoreCurrentCycleBins
+
+        //- The restart-reconstruction concern (v2 separation): the mirror
+        //  of writer -- rebuilds a binItem's components FROM the files the
+        //  writer emitted. Neither function computes a statistic; both only
+        //  invert the writer's serialisation. The checkpoint COUNTERS stay
+        //  with readCheckpoint()/write(), which orchestrate these calls.
+        //  Definitions in BBPAStateTemplates.C.
+        struct state
+        {
+            //- "bin" mode: restore the in-progress cycle's completed bins
+            //  (integ_) from the <field>_Bin / <field>_Bin_UU written before
+            //  a kill, so a restart resumes mid-cycle instead of discarding
+            //  it. Returns the number of bins recovered.
+            template<class Type>
+            static label restoreClosedBins
             (
+                binItem<Type>& bi,
                 const fvMesh& mesh,
                 const scalar cycleStartTime,
                 const scalar binDeltaT,
                 const scalar now,
                 const scalar centreOffset
+            );
+
+            //- Rebuild the cross-cycle ensemble (stats_) from the public
+            //  phase-aligned _PA / _PAVariance / _PA_UU files.
+            //  paSuffix must match what the writer emitted, or the restore
+            //  silently finds nothing and every bin cold-starts.
+            template<class Type>
+            static void restoreStatistics
+            (
+                binItem<Type>& bi,
+                const word& fieldName,
+                const scalar cycleStartTime,
+                const scalar binDeltaT,
+                const word& paSuffix
             );
         };
 
@@ -535,21 +652,35 @@ class BBPA
         //  previousCycle, per-field nCycles + binCounts) and the
         //  phase-aligned _PA / _PAVariance / _PA_UU fields written
         //  at the most recent solver writeTime, reconstructing the
-        //  internal meanFields_, M2Fields_ and meanSqrFields_ arrays.
+        //  internal stats_.mean_, stats_.M2_ and stats_.meanSqr_ arrays.
         //  No-op when no Properties file is found (= cold start).
         void readCheckpoint();
 
-        //- Templated helper: restore one binItem from disk.
-        //  paSuffix must match what write() emitted, or the restore silently
-        //  finds nothing and every bin cold-starts.
-        template<class Type>
-        void restoreBinItemFromDisk
-        (
-            binItem<Type>& bi,
-            const word& fieldName,
-            const scalar cycleStartTime,
-            const word& paSuffix
-        );
+        //- Advance the cycle bookkeeping to cycle c: flush and finalise
+        //  the previous cycle (with the restart-straddle skip), reset the
+        //  integrators, honour discardCycles/maxCycles, and move
+        //  previousCycle_ forward. Called between overlap segments as a
+        //  step crosses a cycle boundary, and after the segment loop when
+        //  a step ENDS exactly on one (so a write at that instant sees
+        //  the completed ensemble). Never retreats.
+        void advanceCycleTo(const label c);
+
+        //- Resolve a field's per-field product options to a binProducts
+        //  (defaults: everything on; writePerCycle defaults to the "bin"
+        //  writeMode). Used by initializeBinItems() and the checkpoint
+        //  signature validation, which must agree.
+        binProducts resolveProducts(const word& fieldName) const;
+
+        //- Strict restart-metadata validation (v2 step 8): compare the
+        //  checkpoint's configuration signature against the current
+        //  dictionary and ABORT on any change that alters accumulator
+        //  shape or meaning -- period, explicit phase origin, nBins,
+        //  binAlignment, the phase selection, a removed field, or a
+        //  product turned ON whose state was never accumulated. A product
+        //  turned OFF only warns (state is discarded, nothing corrupts).
+        //  Checkpoints without a signature (formatVersion < 2) restart
+        //  with a warning and no strict validation, for one release.
+        void validateCheckpoint(const dictionary& propsDict) const;
 
         //- Companion write: one bin (current phase) into solver's
         //  current time directory, for all tracked fields
@@ -614,6 +745,8 @@ public:
 
 #ifdef NoRepository
     #include "BBPATemplates.C"
+    #include "BBPAWriterTemplates.C"
+    #include "BBPAStateTemplates.C"
 #endif
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
