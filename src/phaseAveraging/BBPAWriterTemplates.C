@@ -38,6 +38,7 @@ Description
 #include "BBPA.H"
 #include "volFields.H"
 #include "OFstream.H"
+#include "timeDirName.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 //  writePAField: write a volField to a phase-aligned time directory using an
@@ -110,8 +111,12 @@ void Foam::functionObjects::BBPA::writer::flushClosedBins
         if (now < binEnd - 1e-9*binDeltaT) continue;
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;
-        const word binTimeName = Time::timeName(binTime);
         const fvMesh& mesh = bi.integ_.binSum_[binI].mesh();
+        const word binTimeName = timeDirName
+        (
+            mesh.time(), binTime,
+            timeDirTol(binDeltaT, mesh.time().deltaTValue())
+        );
         const scalar inv = 1.0/bi.integ_.binTime_[binI];
 
         FieldType binField
@@ -207,7 +212,10 @@ void Foam::functionObjects::BBPA::writer::phaseAligned
             // directories, so the bin lands next to the instantaneous field
             // rather than creating a directory of its own.
             const scalar binTime = cycleStartTime + binI * binDeltaT;
-            const word binTimeName = Time::timeName(binTime);
+            const word binTimeName = timeDirName
+            (
+                time, binTime, timeDirTol(binDeltaT, time.deltaTValue())
+            );
 
             // <field>_Bin -- THIS cycle's bin value, a distinct quantity from
             // the cross-cycle mean below. Writing the two separately is what

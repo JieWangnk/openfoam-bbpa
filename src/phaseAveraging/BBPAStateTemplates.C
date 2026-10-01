@@ -37,6 +37,7 @@ Description
 \*---------------------------------------------------------------------------*/
 
 #include "BBPA.H"
+#include "timeDirName.H"
 #include "volFields.H"
 #include "IFstream.H"
 
@@ -81,7 +82,11 @@ Foam::functionObjects::BBPA::state::restoreClosedBins
         if (binStart >= now - 1e-9*binDeltaT) continue;
 
         const scalar binTime = cycleStartTime + binI*binDeltaT;
-        const word binTimeName = Time::timeName(binTime);
+        const word binTimeName = timeDirName
+        (
+            mesh.time(), binTime,
+            timeDirTol(binDeltaT, mesh.time().deltaTValue())
+        );
 
         // Restore only the products that accumulate (allocation is the
         // gate): with the second moment off there is no _Bin_UU on disk and
@@ -201,7 +206,11 @@ void Foam::functionObjects::BBPA::state::restoreStatistics
         if (nCyc <= 0) continue;  // bin never received data
 
         const scalar binTime = cycleStartTime + binI * binDeltaT;
-        const word binTimeName = Time::timeName(binTime);
+        const word binTimeName = timeDirName
+        (
+            mesh.time(), binTime,
+            timeDirTol(binDeltaT, mesh.time().deltaTValue())
+        );
 
         // 1. mean: the writer emits it for every finalised accumulated
         //    bin -- as the _PA product when published, as the meanState

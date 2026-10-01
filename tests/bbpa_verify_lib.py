@@ -212,7 +212,8 @@ def bbpa_fo(extra="", body=None):
 
 def control_dict(kind, dt, end_time, write_interval, start_from, logpath,
                  start_time=0.0, cstep=None, bbpa_extra="", extra_fo="",
-                 bbpa_body=None):
+                 bbpa_body=None, time_precision=10, write_control="runTime",
+                 adjust_time_step="no"):
     return f"""/*--------------------------------*- C++ -*----------------------------------*/
 FoamFile
 {{
@@ -232,16 +233,18 @@ stopAt          endTime;
 endTime         {_f(end_time)};
 deltaT          {_f(dt)};
 
-writeControl    runTime;
+writeControl    {write_control};
 writeInterval   {_f(write_interval)};
 purgeWrite      0;
 writeFormat     ascii;
 writePrecision  17;
 writeCompression off;
 timeFormat      general;
-timePrecision   10;
+timePrecision   {time_precision};
 runTimeModifiable false;
-adjustTimeStep  no;
+adjustTimeStep  {adjust_time_step};
+maxCo           1e6;
+maxDeltaT       {_f(dt)};
 
 functions
 {{
@@ -264,7 +267,8 @@ def sh(cmd, cwd):
 
 
 def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
-              cstep=None, bbpa_extra="", extra_fo="", bbpa_body=None):
+              cstep=None, bbpa_extra="", extra_fo="", bbpa_body=None,
+              time_precision=10, write_control="runTime", adjust_time_step="no"):
     rundir = os.path.join(RUNROOT, name)
     if os.path.exists(rundir):
         shutil.rmtree(rundir)
@@ -275,7 +279,10 @@ def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
     with open(os.path.join(rundir, "system", "controlDict"), "w") as f:
         f.write(control_dict(kind, dt, end_time, write_interval, start_from,
                              logpath, cstep=cstep, bbpa_extra=bbpa_extra,
-                             extra_fo=extra_fo, bbpa_body=bbpa_body))
+                             extra_fo=extra_fo, bbpa_body=bbpa_body,
+                             time_precision=time_precision,
+                             write_control=write_control,
+                             adjust_time_step=adjust_time_step))
     return rundir, logpath
 
 

@@ -19,6 +19,7 @@ for t in \
     test_fixedDt \
     test_writeModes \
     test_restart \
+    test_restartNames \
     test_variableDt \
     test_options \
     test_dictNames \
