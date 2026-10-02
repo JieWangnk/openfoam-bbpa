@@ -76,7 +76,7 @@ def _f(x):
     return repr(float(x))            # 17-sig-fig round-trippable literal
 
 
-def coded_fo(kind, logpath, cstep=None):
+def coded_fo(kind, logpath, cstep=None, sample_offset=0.5):
     """Return the `prescribe` coded functionObject dict text."""
     if cstep is None:
         cstep = CSTEP
@@ -136,7 +136,7 @@ def coded_fo(kind, logpath, cstep=None):
             // v2 overlap contract), and the midpoint names the bin the
             // interval actually lies in, so a non-straddling step carries
             // exactly its own bin's constant. Snap + wrap mirror BBPA.C.
-            const Foam::scalar tt = (t - 0.5*dt) - t0;
+            const Foam::scalar tt = (t - {_f(sample_offset)}*dt) - t0;
             Foam::scalar phase = std::fmod(tt, T);
             if (phase > T*(1.0 - 1e-12)) phase = 0.0;
             const Foam::scalar bArg = phase/dtbin;
@@ -213,7 +213,7 @@ def bbpa_fo(extra="", body=None):
 def control_dict(kind, dt, end_time, write_interval, start_from, logpath,
                  start_time=0.0, cstep=None, bbpa_extra="", extra_fo="",
                  bbpa_body=None, time_precision=10, write_control="runTime",
-                 adjust_time_step="no"):
+                 adjust_time_step="no", sample_offset=0.5):
     return f"""/*--------------------------------*- C++ -*----------------------------------*/
 FoamFile
 {{
@@ -248,7 +248,7 @@ maxDeltaT       {_f(dt)};
 
 functions
 {{
-{coded_fo(kind, logpath, cstep)}
+{coded_fo(kind, logpath, cstep, sample_offset)}
 {bbpa_fo(bbpa_extra, bbpa_body)}
 {extra_fo}
 }}
@@ -268,7 +268,8 @@ def sh(cmd, cwd):
 
 def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
               cstep=None, bbpa_extra="", extra_fo="", bbpa_body=None,
-              time_precision=10, write_control="runTime", adjust_time_step="no"):
+              time_precision=10, write_control="runTime", adjust_time_step="no",
+              sample_offset=0.5):
     rundir = os.path.join(RUNROOT, name)
     if os.path.exists(rundir):
         shutil.rmtree(rundir)
@@ -282,7 +283,8 @@ def make_case(name, kind, dt, end_time, write_interval, start_from="startTime",
                              extra_fo=extra_fo, bbpa_body=bbpa_body,
                              time_precision=time_precision,
                              write_control=write_control,
-                             adjust_time_step=adjust_time_step))
+                             adjust_time_step=adjust_time_step,
+                             sample_offset=sample_offset))
     return rundir, logpath
 
 

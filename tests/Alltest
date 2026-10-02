@@ -20,6 +20,7 @@ for t in \
     test_writeModes \
     test_restart \
     test_restartNames \
+    test_smoothOrder \
     test_variableDt \
     test_options \
     test_dictNames \
