@@ -289,19 +289,35 @@ void Foam::functionObjects::BBPA::flagStraddledBin()
         // Only drop when it is genuinely unrecoverable: the cold-start bin 0
         // (nothing on disk yet), or a restart from the very write that straddles
         // a bin whose window had not closed (hence not flushed) before the kill.
-        bool recoverable = false;
-        if (binNaming_ && !fieldNames_.empty())
+        // Recoverable only if EVERY tracked field has the complete per-cycle
+        // file (published _Bin or state-only _BinState) in the label dir.
+        // v2.1 gated this on binNaming_ (the legacy writeMode bin), so with
+        // the per-field writePerCycle product the straddled bin was restored
+        // by restoreClosedBins and then dropped anyway: a restart one write
+        // back lost the same cycle as a restart from the latest write.
+        bool recoverable = !fieldNames_.empty();
+        if (recoverable)
         {
             const scalar labelTime = clock_.binLabelTime(cyc, binI);
-            const fileName binFile =
+            const fileName labelDir =
                 mesh_.time().path()
                /timeDirName
                 (
                     mesh_.time(), labelTime,
                     timeDirTol(binDeltaT_, mesh_.time().deltaTValue())
+                );
+            forAll(fieldNames_, fi)
+            {
+                if
+                (
+                    !Foam::isFile(labelDir/(fieldNames_[fi] + "_Bin"))
+                 && !Foam::isFile(labelDir/(fieldNames_[fi] + "_BinState"))
                 )
-               /(fieldNames_[0] + "_Bin");
-            recoverable = Foam::isFile(binFile);
+                {
+                    recoverable = false;
+                    break;
+                }
+            }
         }
 
         if (recoverable)
